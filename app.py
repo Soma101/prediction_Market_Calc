@@ -283,7 +283,7 @@ def calculate_arbitrage_metrics(odds_yes, odds_no, budget, fee_pct):
 st.title("⚖️ Prediction Market Arbitrage Scanner")
 st.caption("Auto-matches cross-platform markets to guarantee mathematically optimal spread setups.")
 
-st.sidebar.header("⚙️️ Controls")
+st.sidebar.header("⚙ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️ Manual Custom Odds"])
 
 st.sidebar.subheader("🎯 Market Configuration")
@@ -299,6 +299,8 @@ selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_map.k
 category_slug = category_map[selected_cat_label]
 
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
+
+match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=85, step=1) / 100.0
 
 kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
 poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=10, value=5)
@@ -331,7 +333,7 @@ if mode == "📡 Live Scanner (Auto-Match)":
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
 
             if kalshi_list and poly_list:
-                top_opportunities = find_best_arbitrage(kalshi_list, poly_list)
+                top_opportunities = find_best_arbitrage(kalshi_list, poly_list, min_similarity=match_strictness)
                 
                 if arb_only:
                     top_opportunities = [op for op in top_opportunities if op['implied_sum'] < 1.0]
@@ -360,9 +362,9 @@ if mode == "📡 Live Scanner (Auto-Match)":
                             st.divider()
                 else:
                     if arb_only:
-                        st.warning("No pure arbitrage opportunities (S < 100%) found at current market prices. Uncheck 'Only Show Guaranteed Arbitrage' to view limit-order candidates.")
+                        st.warning("No pure arbitrage opportunities found at current market prices. Uncheck 'Only Show Guaranteed Arbitrage' to view limit-order candidates, or lower Match Strictness.")
                     else:
-                        st.warning("Could not find any overlapping markets with sufficient similarity. Try expanding category or depth.")
+                        st.warning("Could not find any overlapping markets. Try lowering the Match Strictness slider or expanding category/depth.")
             else:
                 st.error("Missing data from one of the platforms. Cannot run cross-matching.")
     else:
