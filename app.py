@@ -3,46 +3,68 @@ import requests
 import json
 
 st.set_page_config(
-    page_title="Arbitrage Calculator (Kalshi & Polymarket)",
+    page_title="Arbitrage Scanner (Kalshi & Polymarket)",
     page_icon="⚖️",
     layout="wide"
 )
+
+# Standard browser headers required to bypass Cloudflare API blocks
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json"
+}
 
 # ------------------------------------------------------------------
 # Live Market API Fetchers (Cached for 60s)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def fetch_kalshi_markets():
-    """Fetch open markets from Kalshi public REST API."""
-    url = "https://api.elections.kalshi.com/trade-api/v2/markets"
+    """Fetch open markets from Kalshi public REST API with fallback hosts & browser headers."""
+    hosts = [
+        "https://external-api.kalshi.com/trade-api/v2/markets",
+        "https://api.elections.kalshi.com/trade-api/v2/markets"
+    ]
     params = {"limit": 100, "status": "open"}
-    try:
-        resp = requests.get(url, params=params, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json().get("markets", [])
-            parsed = []
-            for m in data:
-                title = m.get("title") or m.get("ticker", "Unknown")
-                yes_ask = m.get("yes_ask", 0)
-                no_ask = m.get("no_ask", 0)
-                
-                # Derive ask from opposite bid if ask is unlisted
-                if yes_ask == 0 and m.get("no_bid", 0) > 0:
-                    yes_ask = 100 - m.get("no_bid")
-                if no_ask == 0 and m.get("yes_bid", 0) > 0:
-                    no_ask = 100 - m.get("yes_bid")
+    
+    for url in hosts:
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json().get("markets", [])
+                parsed = []
+                for m in data:
+                    title = m.get("title") or m.get("ticker", "Unknown")
+                    
+                    # Kalshi prices are quoted in cents (1 to 99)
+                    yes_ask = m.get("yes_ask", 0) or 0
+                    no_ask = m.get("no_ask", 0) or 0
+                    yes_bid = m.get("yes_bid", 0) or 0
+                    no_bid = m.get("no_bid", 0) or 0
+                    
+                    # Derive ask prices from opposing bids if ask is unlisted
+                    if yes_ask == 0 and no_bid > 0:
+                        yes_ask = 100 - no_bid
+                    if no_ask == 0 and yes_bid > 0:
+                        no_ask = 100 - yes_bid
+                        
+                    # Fallback to last trade price if orderbook depth is thin
+                    if yes_ask == 0:
+                        yes_ask = m.get("last_price", 0) or 0
+                    if no_ask == 0 and yes_ask > 0:
+                        no_ask = 100 - yes_ask
 
-                if yes_ask > 0 and no_ask > 0:
-                    parsed.append({
-                        "id": m.get("ticker"),
-                        "title": title,
-                        "yes_odds": round(100.0 / yes_ask, 2),
-                        "no_odds": round(100.0 / no_ask, 2),
-                        "source": "Kalshi"
-                    })
-            return parsed
-    except Exception as e:
-        st.sidebar.error(f"Kalshi API connection issue: {e}")
+                    if yes_ask > 0 and no_ask > 0:
+                        parsed.append({
+                            "id": m.get("ticker"),
+                            "title": title,
+                            "yes_odds": round(100.0 / yes_ask, 2),
+                            "no_odds": round(100.0 / no_ask, 2),
+                            "source": "Kalshi"
+                        })
+                if parsed:
+                    return parsed
+        except Exception:
+            continue
     return []
 
 @st.cache_data(ttl=60)
@@ -51,7 +73,7 @@ def fetch_polymarket_markets():
     url = "https://gamma-api.polymarket.com/markets"
     params = {"closed": "false", "limit": 100, "active": "true"}
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             parsed = []
@@ -75,8 +97,8 @@ def fetch_polymarket_markets():
                     except (ValueError, TypeError):
                         continue
             return parsed
-    except Exception as e:
-        st.sidebar.error(f"Polymarket API connection issue: {e}")
+    except Exception:
+        pass
     return []
 
 # ------------------------------------------------------------------
@@ -126,21 +148,27 @@ if mode == "📡 Live Scanner (APIs)":
             st.warning("No live markets loaded from Polymarket.")
             selected_p = None
 
-    # Compare selected odds to pick the highest available YES and NO
+    # Determine best odds between selections
     if selected_k and selected_p:
         if selected_k["yes_odds"] >= selected_p["yes_odds"]:
             odds_yes = selected_k["yes_odds"]
-            yes_source = f"Kalshi ({selected_k['title'][:30]}...)"
+            yes_source = f"Kalshi ({selected_k['title'][:25]}...)"
         else:
             odds_yes = selected_p["yes_odds"]
-            yes_source = f"Polymarket ({selected_p['title'][:30]}...)"
+            yes_source = f"Polymarket ({selected_p['title'][:25]}...)"
 
         if selected_k["no_odds"] >= selected_p["no_odds"]:
             odds_no = selected_k["no_odds"]
-            no_source = f"Kalshi ({selected_k['title'][:30]}...)"
+            no_source = f"Kalshi ({selected_k['title'][:25]}...)"
         else:
             odds_no = selected_p["no_odds"]
-            no_source = f"Polymarket ({selected_p['title'][:30]}...)"
+            no_source = f"Polymarket ({selected_p['title'][:25]}...)"
+    elif selected_k:
+        odds_yes, odds_no = selected_k["yes_odds"], selected_k["no_odds"]
+        yes_source = no_source = "Kalshi"
+    elif selected_p:
+        odds_yes, odds_no = selected_p["yes_odds"], selected_p["no_odds"]
+        yes_source = no_source = "Polymarket"
 
 else:
     st.sidebar.subheader("Custom Odds Entry")
@@ -172,13 +200,13 @@ roi = (net_profit / budget) * 100
 
 st.divider()
 
-# Key Performance Indicators
+# KPIs
 kpi1, kpi2, kpi3 = st.columns(3)
 kpi1.metric("Implied Prob. Sum", f"{implied_sum * 100:.2f}%")
 kpi2.metric("Net Profit / Loss", f"${net_profit:+.2f}")
 kpi3.metric("ROI", f"{roi:+.2f}%")
 
-# Status Banner
+# Banner
 if implied_sum < 1.0 and net_profit > 0:
     st.success("🎯 **ARBITRAGE OPPORTUNITY DETECTED:** Guaranteed profit locked across selections.")
 elif implied_sum < 1.0 and net_profit <= 0:
@@ -186,7 +214,7 @@ elif implied_sum < 1.0 and net_profit <= 0:
 else:
     st.error("❌ **NO ARBITRAGE:** Combined market structure results in a net loss.")
 
-# Detailed Allocation Table
+# Table
 st.subheader("📊 Execution Plan")
 data = {
     "Outcome": ["YES", "NO"],
