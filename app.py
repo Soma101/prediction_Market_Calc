@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import json
+from difflib import SequenceMatcher
 
 st.set_page_config(
     page_title="Prediction Market Arbitrage Scanner",
@@ -11,40 +12,45 @@ st.set_page_config(
 # ------------------------------------------------------------------
 # Live Market API Fetchers
 # ------------------------------------------------------------------
-KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/"
-POLYMARKET_API_URL = "https://gamma-api.polymarket.com/markets?closed=false&limit=100&active=true"
+# Pass query parameters directly to your worker so Kalshi returns active open markets
+KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/markets?limit=1000&status=open"
+POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
 }
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=180)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi via your Cloudflare Worker Proxy."""
+    """Fetch active markets from Kalshi via Cloudflare Worker Proxy."""
     parsed = []
     try:
-        resp = requests.get(KALSHI_PROXY_URL, timeout=10)
+        resp = requests.get(KALSHI_PROXY_URL, timeout=12)
         if resp.status_code == 200:
-            data = resp.json().get("markets", [])
+            raw = resp.json()
+            data = raw.get("markets", []) if isinstance(raw, dict) else raw
+            
             for m in data:
                 title = m.get("title") or m.get("ticker") or "Unknown"
                 
                 # Kalshi prices are in cents (1 to 99)
                 yes_ask = m.get("yes_ask", 0) or m.get("last_price", 0) or 0
-                no_ask = m.get("no_ask", 0) or (100 - yes_ask if yes_ask > 0 else 0)
+                no_ask = m.get("no_ask", 0) or (100 - yes_ask if 0 < yes_ask < 100 else 0)
 
-                if yes_ask > 0 and no_ask > 0:
+                if 0 < yes_ask < 100 and 0 < no_ask < 100:
                     parsed.append({
                         "id": m.get("ticker", "N/A"),
                         "title": title,
+                        "yes_price": yes_ask / 100.0,
+                        "no_price": no_ask / 100.0,
                         "yes_odds": round(100.0 / yes_ask, 2),
                         "no_odds": round(100.0 / no_ask, 2),
                         "source": "Kalshi"
                     })
 
             if parsed:
-                return parsed, f"✅ Connected to Kalshi API via Cloudflare Worker ({len(parsed)} markets loaded)"
+                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets)"
             else:
                 return [], "⚠️ Kalshi Worker returned empty market list."
         else:
@@ -52,43 +58,72 @@ def fetch_kalshi_markets():
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
-@st.cache_data(ttl=300)
-def fetch_polymarket_markets():
-    """Fetch active markets from Polymarket Gamma REST API."""
+@st.cache_data(ttl=180)
+def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
+    """
+    Fetch active markets from Polymarket Gamma API with pagination and category filtering.
+    """
     parsed = []
+    seen_ids = set()
     try:
-        resp = requests.get(POLYMARKET_API_URL, headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            for m in resp.json():
-                question = m.get("question") or "Unknown"
-                raw_prices = m.get("outcomePrices")
-                if raw_prices:
-                    try:
-                        prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                        if len(prices) >= 2:
-                            p_yes = float(prices[0])
-                            p_no = float(prices[1])
-                            if p_yes > 0 and p_no > 0:
-                                parsed.append({
-                                    "id": str(m.get("id")),
-                                    "title": question,
-                                    "yes_odds": round(1.0 / p_yes, 2),
-                                    "no_odds": round(1.0 / p_no, 2),
-                                    "source": "Polymarket"
-                                })
-                    except (ValueError, TypeError):
-                        continue
-            if parsed:
-                return parsed, f"✅ Connected to Polymarket API ({len(parsed)} markets loaded)"
+        for page in range(pages_to_fetch):
+            offset = page * 100
+            url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
+            
+            # Apply Polymarket Tag Slug
+            if category_slug != "all":
+                url += f"&tag_slug={category_slug}"
+
+            resp = requests.get(url, headers=HEADERS, timeout=12)
+            if resp.status_code == 200:
+                events = resp.json()
+                if not events:
+                    break
+                
+                for ev in events:
+                    markets = ev.get("markets", [])
+                    event_title = ev.get("title", "")
+                    
+                    for m in markets:
+                        m_id = str(m.get("id"))
+                        if m_id in seen_ids:
+                            continue
+                        seen_ids.add(m_id)
+
+                        question = m.get("question") or event_title or "Unknown"
+                        raw_prices = m.get("outcomePrices")
+                        
+                        if raw_prices:
+                            try:
+                                prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                                if len(prices) >= 2:
+                                    p_yes = float(prices[0])
+                                    p_no = float(prices[1])
+                                    
+                                    if p_yes > 0 and p_no > 0:
+                                        parsed.append({
+                                            "id": m_id,
+                                            "title": question,
+                                            "yes_price": p_yes,
+                                            "no_price": p_no,
+                                            "yes_odds": round(1.0 / p_yes, 2),
+                                            "no_odds": round(1.0 / p_no, 2),
+                                            "source": "Polymarket"
+                                        })
+                            except (ValueError, TypeError):
+                                continue
             else:
-                return [], "⚠️ Polymarket returned empty market list."
+                break
+
+        if parsed:
+            return parsed, f"✅ Connected to Polymarket ({len(parsed)} markets loaded)"
         else:
-            return [], f"❌ Polymarket API returned HTTP {resp.status_code}"
+            return [], f"⚠️ No markets found for category '{category_slug}'."
     except Exception as e:
         return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
-# UI & Layout
+# UI & Controls
 # ------------------------------------------------------------------
 st.title("⚖️ Prediction Market Arbitrage Scanner")
 st.caption("Real-time cross-exchange market scanner for Kalshi and Polymarket.")
@@ -96,6 +131,23 @@ st.caption("Real-time cross-exchange market scanner for Kalshi and Polymarket.")
 # Sidebar Controls
 st.sidebar.header("⚙️ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner", "✏️ Manual Custom Odds"])
+
+# Category & Depth Filters
+st.sidebar.subheader("🎯 Market Category & Search")
+category_map = {
+    "All Markets": "all",
+    "🎾 Tennis": "tennis",
+    "⚽ Sports (General)": "sports",
+    "🏛️ Politics": "politics",
+    "📈 Crypto & Finance": "crypto",
+    "🍿 Pop Culture": "pop-culture"
+}
+selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_map.keys()))
+category_slug = category_map[selected_cat_label]
+
+search_query = st.sidebar.text_input("Keyword Search (e.g., Open, NBA, Fed)", "").strip().lower()
+fetch_depth = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=10, value=4)
+
 budget = st.sidebar.number_input("Total Investment ($)", min_value=1.0, value=100.0, step=10.0)
 fee_pct = st.sidebar.number_input("Platform Fee on Profit (%)", min_value=0.0, max_value=20.0, value=0.0, step=0.5)
 
@@ -110,49 +162,54 @@ no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner":
     kalshi_list, k_status = fetch_kalshi_markets()
-    poly_list, p_status = fetch_polymarket_markets()
+    poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=fetch_depth)
 
-    with st.expander("🔍 Connection Status & Diagnostics"):
-        st.write(f"**Kalshi Proxy Status:** {k_status}")
-        st.write(f"**Polymarket API Status:** {p_status}")
+    # Apply Client-Side Search Keyword Filter
+    if search_query:
+        kalshi_list = [m for m in kalshi_list if search_query in m['title'].lower()]
+        poly_list = [m for m in poly_list if search_query in m['title'].lower()]
+
+    with st.expander("🔍 Connection Diagnostics & Status", expanded=False):
+        st.write(f"**Kalshi Status:** {k_status}")
+        st.write(f"**Polymarket Status:** {p_status}")
 
     col_k, col_p = st.columns(2)
 
     with col_k:
-        st.subheader("🏛️ Kalshi Markets")
+        st.subheader(f"🏛️ Kalshi ({len(kalshi_list)})")
         if kalshi_list:
-            k_titles = {f"{m['title']} (YES: {m['yes_odds']} | NO: {m['no_odds']})": m for m in kalshi_list}
+            k_titles = {f"{m['title'][:60]}... (YES: {m['yes_odds']} | NO: {m['no_odds']})": m for m in kalshi_list}
             selected_k_label = st.selectbox("Select Kalshi Event", list(k_titles.keys()), key="k_select")
             selected_k = k_titles[selected_k_label]
         else:
-            st.error("No Kalshi markets available.")
+            st.info("No matching Kalshi markets.")
             selected_k = None
 
     with col_p:
-        st.subheader("🟣 Polymarket Markets")
+        st.subheader(f"🟣 Polymarket ({len(poly_list)})")
         if poly_list:
-            p_titles = {f"{m['title']} (YES: {m['yes_odds']} | NO: {m['no_odds']})": m for m in poly_list}
+            p_titles = {f"{m['title'][:60]}... (YES: {m['yes_odds']} | NO: {m['no_odds']})": m for m in poly_list}
             selected_p_label = st.selectbox("Select Polymarket Event", list(p_titles.keys()), key="p_select")
             selected_p = p_titles[selected_p_label]
         else:
-            st.error("No Polymarket markets available.")
+            st.info("No matching Polymarket markets.")
             selected_p = None
 
-    # Determine best odds across selected selections
+    # Determine Best Odds for Arbitrage Pair
     if selected_k and selected_p:
         if selected_k["yes_odds"] >= selected_p["yes_odds"]:
             odds_yes = selected_k["yes_odds"]
-            yes_source = f"Kalshi ({selected_k['title'][:25]}...)"
+            yes_source = f"Kalshi: {selected_k['title'][:25]}..."
         else:
             odds_yes = selected_p["yes_odds"]
-            yes_source = f"Polymarket ({selected_p['title'][:25]}...)"
+            yes_source = f"Polymarket: {selected_p['title'][:25]}..."
 
         if selected_k["no_odds"] >= selected_p["no_odds"]:
             odds_no = selected_k["no_odds"]
-            no_source = f"Kalshi ({selected_k['title'][:25]}...)"
+            no_source = f"Kalshi: {selected_k['title'][:25]}..."
         else:
             odds_no = selected_p["no_odds"]
-            no_source = f"Polymarket ({selected_p['title'][:25]}...)"
+            no_source = f"Polymarket: {selected_p['title'][:25]}..."
     elif selected_k:
         odds_yes, odds_no = selected_k["yes_odds"], selected_k["no_odds"]
         yes_source = no_source = "Kalshi"
@@ -168,8 +225,8 @@ else:
 # ------------------------------------------------------------------
 # Arbitrage Calculation Engine
 # ------------------------------------------------------------------
-p_yes = 1 / odds_yes
-p_no = 1 / odds_no
+p_yes = 1.0 / odds_yes
+p_no = 1.0 / odds_no
 implied_sum = p_yes + p_no
 
 stake_yes = budget * (odds_no / (odds_yes + odds_no))
@@ -196,7 +253,7 @@ kpi1.metric("Implied Prob. Sum", f"{implied_sum * 100:.2f}%")
 kpi2.metric("Net Profit / Loss", f"${net_profit:+.2f}")
 kpi3.metric("ROI", f"{roi:+.2f}%")
 
-# Banner Outcome
+# Outcome Banner
 if implied_sum < 1.0 and net_profit > 0:
     st.success("🎯 **ARBITRAGE OPPORTUNITY DETECTED:** Guaranteed profit locked across selections.")
 elif implied_sum < 1.0 and net_profit <= 0:
