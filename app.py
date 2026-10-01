@@ -9,9 +9,10 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------------
-# API Endpoints & Headers
+# Endpoints & Headers
 # ------------------------------------------------------------------
-KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/markets?limit=200&status=open"
+# Fetching 1,000 items ensures single binary markets are retrieved alongside parlays
+KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/markets?limit=1000&status=open"
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 
 HEADERS = {
@@ -20,65 +21,106 @@ HEADERS = {
 }
 
 # ------------------------------------------------------------------
-# Kalshi Reciprocal Binary Price Engine
+# Kalshi Reciprocal Binary Price Engine & Category Filter
 # ------------------------------------------------------------------
 def parse_kalshi_market_prices(m):
     """
-    Extracts YES/NO buy prices (0.01 to 0.99) using Kalshi's binary duality:
-    - YES Ask (Buy YES) = 1.00 - NO Bid
-    - NO Ask  (Buy NO)  = 1.00 - YES Bid
-    Safely converts string, integer, or float inputs.
+    Parses single binary market prices while strictly filtering out 
+    un-traded Multivariate Event (MVE) custom parlays.
     """
+    # Filter out 0-liquidity MVE / Custom Parlay markets
+    if m.get("strike_type") == "custom" or "mve_selected_legs" in m or "mve_collection_ticker" in m:
+        return 0.0, 0.0
+
     def to_float(val):
         if val is None:
             return 0.0
         try:
             v = float(str(val).strip())
-            # Convert legacy cents to dollars if v > 1.0 (e.g. 42 -> 0.42)
             return v / 100.0 if v > 1.0 else v
         except (ValueError, TypeError):
             return 0.0
 
-    # Extract all candidate price fields (dollar strings or legacy floats)
     yes_bid = to_float(m.get("yes_bid_dollars") or m.get("yes_bid"))
     no_bid  = to_float(m.get("no_bid_dollars") or m.get("no_bid"))
     yes_ask = to_float(m.get("yes_ask_dollars") or m.get("yes_ask"))
     no_ask  = to_float(m.get("no_ask_dollars") or m.get("no_ask"))
     last_p  = to_float(m.get("last_price_dollars") or m.get("last_price"))
 
-    # 1. Compute YES Ask (Cost to Buy YES)
-    if yes_ask > 0:
+    # Derive YES Price (Cost to Buy YES)
+    if 0 < yes_ask < 1.0:
         p_yes = yes_ask
-    elif no_bid > 0:
-        p_yes = 1.0 - no_bid  # Reciprocal rule
-    elif last_p > 0:
-        p_yes = last_p
-    elif yes_bid > 0:
+    elif 0 < no_bid < 1.0:
+        p_yes = 1.0 - no_bid
+    elif 0 < yes_bid < 1.0:
         p_yes = yes_bid
+    elif 0 < last_p < 1.0:
+        p_yes = last_p
     else:
         p_yes = 0.0
 
-    # 2. Compute NO Ask (Cost to Buy NO)
-    if no_ask > 0:
+    # Derive NO Price (Cost to Buy NO)
+    if 0 < no_ask < 1.0:
         p_no = no_ask
-    elif yes_bid > 0:
-        p_no = 1.0 - yes_bid  # Reciprocal rule
-    elif last_p > 0:
-        p_no = 1.0 - last_p
-    elif no_bid > 0:
+    elif 0 < yes_bid < 1.0:
+        p_no = 1.0 - yes_bid
+    elif 0 < no_bid < 1.0:
         p_no = no_bid
+    elif 0 < last_p < 1.0:
+        p_no = 1.0 - last_p
     else:
         p_no = 0.0
 
-    # Bound check within valid probability limits
-    p_yes = round(p_yes, 4) if 0.001 <= p_yes <= 0.999 else 0.0
-    p_no  = round(p_no, 4) if 0.001 <= p_no <= 0.999 else 0.0
+    # Fill missing side if one side has valid pricing
+    if p_yes > 0 and p_no == 0:
+        p_no = round(1.0 - p_yes, 4)
+    elif p_no > 0 and p_yes == 0:
+        p_yes = round(1.0 - p_no, 4)
 
-    return p_yes, p_no
+    # Require active order book pricing (1¢ to 99¢)
+    if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
+        return round(p_yes, 4), round(p_no, 4)
 
+    return 0.0, 0.0
+
+def matches_kalshi_category(market, cat_slug):
+    """Filters Kalshi markets client-side using categories and ticker/title metadata."""
+    if cat_slug == "all":
+        return True
+    
+    title = str(market.get("title", "")).lower()
+    category = str(market.get("category", "")).lower()
+    ticker = str(market.get("ticker", "")).lower()
+    event_ticker = str(market.get("event_ticker", "")).lower()
+
+    if cat_slug == "tennis":
+        keywords = ["tennis", "wta", "atp", "open", "slam", "federer", "nadal", "djokovic", "alcaraz", "swiatek", "gauff", "sinner", "sabalenka"]
+        return any(kw in title or kw in ticker for kw in keywords)
+    
+    elif cat_slug == "sports":
+        sports_terms = ["sport", "nba", "nfl", "mlb", "nhl", "wnba", "soccer", "football", "basketball", "baseball", "hockey", "tennis", "golf", "ufc", "mma", "f1", "nascar", "premier league", "champions league"]
+        return "sport" in category or any(kw in title or kw in ticker or kw in event_ticker for kw in sports_terms)
+
+    elif cat_slug == "politics":
+        politics_terms = ["politic", "election", "president", "trump", "biden", "senate", "house", "congress", "governor", "democrat", "republican", "vote", "poll", "supreme court", "white house"]
+        return "politic" in category or any(kw in title or kw in ticker for kw in politics_terms)
+
+    elif cat_slug == "crypto":
+        crypto_terms = ["crypto", "bitcoin", "btc", "ethereum", "eth", "solana", "sol", "fed", "rate", "inflation", "cpi", "gdp", "s&p", "stock", "yield", "interest"]
+        return any(c in category for c in ["crypto", "economic", "financial"]) or any(kw in title or kw in ticker for kw in crypto_terms)
+
+    elif cat_slug == "pop-culture":
+        pop_terms = ["culture", "entertainment", "movie", "oscar", "grammy", "box office", "billboard", "emmy", "stream", "album", "twitter", "x.com"]
+        return any(c in category for c in ["culture", "entertainment"]) or any(kw in title or kw in ticker for kw in pop_terms)
+
+    return True
+
+# ------------------------------------------------------------------
+# Live Market API Fetchers
+# ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi with reciprocal price derivation."""
+    """Fetch active single markets from Kalshi."""
     parsed = []
     raw_sample = None
     try:
@@ -86,7 +128,6 @@ def fetch_kalshi_markets():
         if resp.status_code == 200:
             raw = resp.json()
             
-            # Robust dict/list unwrapping
             if isinstance(raw, dict):
                 data = raw.get("markets") or raw.get("data") or []
             elif isinstance(raw, list):
@@ -94,7 +135,7 @@ def fetch_kalshi_markets():
             else:
                 data = []
 
-            if data and len(data) > 0:
+            if data:
                 raw_sample = data[0]
 
             for m in data:
@@ -105,6 +146,9 @@ def fetch_kalshi_markets():
                     parsed.append({
                         "id": m.get("ticker", "N/A"),
                         "title": title,
+                        "category": m.get("category", "General"),
+                        "ticker": m.get("ticker", ""),
+                        "event_ticker": m.get("event_ticker", ""),
                         "yes_price": p_yes,
                         "no_price": p_no,
                         "yes_odds": round(1.0 / p_yes, 2),
@@ -113,9 +157,9 @@ def fetch_kalshi_markets():
                     })
 
             if parsed:
-                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets loaded)", raw_sample
+                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active single markets loaded)", raw_sample
             else:
-                return [], f"⚠️ Kalshi proxy returned {len(data)} items, but 0 had active bid/ask pricing.", raw_sample
+                return [], f"⚠️ Scanned {len(data)} Kalshi items, but 0 had active pricing or were non-MVE.", raw_sample
         else:
             return [], f"❌ Kalshi Worker returned HTTP {resp.status_code}", None
     except Exception as e:
@@ -219,10 +263,13 @@ yes_source = "Manual Entry"
 no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner":
-    kalshi_list, k_status, k_sample = fetch_kalshi_markets()
+    raw_kalshi_list, k_status, k_sample = fetch_kalshi_markets()
     poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=fetch_depth)
 
-    # Client-side Keyword Search Filter
+    # Apply Category Filter to Kalshi
+    kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
+
+    # Client-side Keyword Search Filter across both
     if search_query:
         kalshi_list = [m for m in kalshi_list if search_query in m['title'].lower()]
         poly_list = [m for m in poly_list if search_query in m['title'].lower()]
@@ -231,7 +278,7 @@ if mode == "📡 Live Scanner":
         st.write(f"**Kalshi Status:** {k_status}")
         st.write(f"**Polymarket Status:** {p_status}")
         if k_sample:
-            st.caption("Raw Kalshi Market Structure Sample:")
+            st.caption("Raw Kalshi Market Sample Structure:")
             st.json(k_sample)
 
     col_k, col_p = st.columns(2)
@@ -243,7 +290,7 @@ if mode == "📡 Live Scanner":
             selected_k_label = st.selectbox("Select Kalshi Event", list(k_titles.keys()), key="k_select")
             selected_k = k_titles[selected_k_label]
         else:
-            st.info("No matching Kalshi markets.")
+            st.info(f"No matching Kalshi markets for category '{selected_cat_label}'.")
             selected_k = None
 
     with col_p:
@@ -253,7 +300,7 @@ if mode == "📡 Live Scanner":
             selected_p_label = st.selectbox("Select Polymarket Event", list(p_titles.keys()), key="p_select")
             selected_p = p_titles[selected_p_label]
         else:
-            st.info("No matching Polymarket markets.")
+            st.info(f"No matching Polymarket markets for category '{selected_cat_label}'.")
             selected_p = None
 
     # Determine Best Odds Pair across selections
