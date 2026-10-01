@@ -69,22 +69,22 @@ def matches_kalshi_category(market, cat_slug):
     ticker, event_ticker = str(market.get("ticker", "")).lower(), str(market.get("event_ticker", "")).lower()
 
     if cat_slug == "tennis":
-        return any(kw in title or kw in ticker for kw in ["tennis", "wta", "atp", "open", "slam", "federer", "nadal", "djokovic", "alcaraz", "swiatek", "gauff", "sinner"])
+        return any(kw in title or kw in ticker for kw in ["tennis", "wta", "atp", "open", "slam", "djokovic", "alcaraz", "swiatek", "sinner"])
     elif cat_slug == "sports":
-        return "sport" in category or any(kw in title or kw in ticker or kw in event_ticker for kw in ["sport", "nba", "nfl", "mlb", "nhl", "wnba", "soccer", "football", "basketball", "baseball", "hockey", "ufc", "mma", "f1"])
+        return "sport" in category or any(kw in title or kw in ticker or kw in event_ticker for kw in ["sport", "nba", "nfl", "mlb", "nhl", "soccer", "basketball", "ufc", "f1"])
     elif cat_slug == "politics":
-        return "politic" in category or any(kw in title or kw in ticker for kw in ["politic", "election", "president", "trump", "biden", "senate", "house", "congress", "governor", "democrat", "republican"])
+        return "politic" in category or any(kw in title or kw in ticker for kw in ["politic", "election", "president", "trump", "biden", "senate", "congress"])
     elif cat_slug == "crypto":
-        return any(c in category for c in ["crypto", "economic", "financial"]) or any(kw in title or kw in ticker for kw in ["crypto", "bitcoin", "btc", "ethereum", "eth", "solana", "fed", "rate", "inflation", "cpi"])
+        return any(c in category for c in ["crypto", "economic", "financial"]) or any(kw in title or kw in ticker for kw in ["crypto", "bitcoin", "btc", "ethereum", "fed", "rate", "cpi"])
     elif cat_slug == "pop-culture":
-        return any(c in category for c in ["culture", "entertainment"]) or any(kw in title or kw in ticker for kw in ["movie", "oscar", "grammy", "box office", "billboard", "emmy", "stream", "album"])
+        return any(c in category for c in ["culture", "entertainment"]) or any(kw in title or kw in ticker for kw in ["movie", "oscar", "grammy", "box office", "emmy"])
     return True
 
 # ------------------------------------------------------------------
 # Live API Fetchers (With Cursor Pagination)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(pages_to_fetch=5):
+def fetch_kalshi_markets(pages_to_fetch=2):
     """Fetch active single markets from Kalshi using cursor pagination."""
     parsed = []
     raw_sample = None
@@ -97,7 +97,7 @@ def fetch_kalshi_markets(pages_to_fetch=5):
             if cursor:
                 url += f"&cursor={cursor}"
                 
-            resp = requests.get(url, timeout=12)
+            resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 raw = resp.json()
                 data = raw.get("markets") or raw.get("data") or []
@@ -122,11 +122,11 @@ def fetch_kalshi_markets(pages_to_fetch=5):
                 
                 cursor = raw.get("cursor")
                 if not cursor:
-                    break  # No more pages
+                    break
             else:
                 break
                 
-        status_msg = f"✅ Connected to Kalshi ({len(parsed)} active single markets loaded across {page+1} pages)"
+        status_msg = f"✅ Connected to Kalshi ({len(parsed)} active markets loaded across {page+1} pages)"
         return parsed, status_msg, raw_sample
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}", None
@@ -143,7 +143,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=5):
             if category_slug != "all":
                 url += f"&tag_slug={category_slug}"
 
-            resp = requests.get(url, headers=HEADERS, timeout=12)
+            resp = requests.get(url, headers=HEADERS, timeout=10)
             if resp.status_code == 200:
                 events = resp.json()
                 if not events: break
@@ -178,7 +178,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=5):
         return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
-# High-Performance Fast Auto-Matching Engine
+# Cached Auto-Matching Arbitrage Engine
 # ------------------------------------------------------------------
 STOP_WORDS = {
     "will", "happen", "the", "and", "for", "that", "this", "with", "from",
@@ -187,20 +187,19 @@ STOP_WORDS = {
 }
 
 def clean_text_for_match(text):
-    """Strips special characters and standardizes text for matching."""
     text = re.sub(r'[^a-z0-9 ]', '', text.lower()).strip()
     return text.replace("will ", "").replace(" happen", "")
 
 def tokenize_title(text):
-    """Extracts significant tokens for index lookup."""
     clean = clean_text_for_match(text)
     words = clean.split()
     return set(w for w in words if len(w) >= 3 and w not in STOP_WORDS)
 
-def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
+@st.cache_data(ttl=120)
+def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
     """
-    Indexed candidate pre-filtering + difflib scoring.
-    Executes cross-platform matching in <1.5s even with 40,000+ markets.
+    Cached, indexed matching engine.
+    Prevents UI re-renders from re-triggering computation loops.
     """
     if not kalshi_markets or not poly_markets:
         return []
@@ -221,7 +220,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
         if not k_tokens:
             continue
 
-        # Accumulate candidates that share at least 1 keyword
         candidate_counts = defaultdict(int)
         candidate_objs = {}
 
@@ -234,7 +232,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
         if not candidate_counts:
             continue
 
-        # Filter candidates: require at least 2 matching tokens (or 1 if total tokens <= 2)
         min_matches = 2 if len(k_tokens) >= 2 else 1
         relevant_candidates = [
             candidate_objs[pid] for pid, count in candidate_counts.items()
@@ -245,7 +242,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
         best_match = None
         best_score = 0.0
 
-        # Step 3: Run difflib ONLY on candidate subset
         for p in relevant_candidates:
             p_clean = clean_text_for_match(p['title'])
             score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
@@ -260,9 +256,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
                 continue
             seen_pair_keys.add(pair_key)
 
-            # Option A: Buy YES on Kalshi, NO on Polymarket
             implied_sum_A = (1.0 / k['yes_odds']) + (1.0 / best_match['no_odds'])
-            # Option B: Buy NO on Kalshi, YES on Polymarket
             implied_sum_B = (1.0 / best_match['yes_odds']) + (1.0 / k['no_odds'])
 
             if implied_sum_A < implied_sum_B:
@@ -284,7 +278,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.55):
                     "similarity": best_score
                 })
 
-    # Sort so the lowest implied probability sum (highest profit) is at the top
     best_pairs.sort(key=lambda x: x['implied_sum'])
     return best_pairs
 
@@ -309,8 +302,8 @@ category_map = {
 selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_map.keys()))
 category_slug = category_map[selected_cat_label]
 
-kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=10, value=5)
-poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=20, value=10)
+kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
+poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=10, value=5)
 
 budget = st.sidebar.number_input("Total Investment ($)", min_value=1.0, value=100.0, step=10.0)
 fee_pct = st.sidebar.number_input("Platform Fee on Profit (%)", min_value=0.0, max_value=20.0, value=0.0, step=0.5)
@@ -325,39 +318,36 @@ yes_source = "Manual Entry"
 no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner (Auto-Match)":
-    with st.spinner("Fetching and auto-matching thousands of cross-platform markets..."):
-        raw_kalshi_list, k_status, _ = fetch_kalshi_markets(pages_to_fetch=kalshi_pages)
-        poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages)
+    raw_kalshi_list, k_status, _ = fetch_kalshi_markets(pages_to_fetch=kalshi_pages)
+    poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages)
 
-        # Apply Category Filter to Kalshi
-        kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
+    kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
 
-        st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
+    st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
 
-        if kalshi_list and poly_list:
-            top_opportunities = find_best_arbitrage(kalshi_list, poly_list)
+    if kalshi_list and poly_list:
+        top_opportunities = find_best_arbitrage(kalshi_list, poly_list)
+        
+        if top_opportunities:
+            best_arb = top_opportunities[0]
             
-            if top_opportunities:
-                best_arb = top_opportunities[0]
-                
-                # Show top matched pair
-                st.info(f"**🤖 Auto-Match Engine Identified Best Setup (Similarity: {best_arb['similarity']*100:.1f}%)**")
-                
-                odds_yes = best_arb["best_odds_yes"]
-                odds_no = best_arb["best_odds_no"]
-                yes_source = best_arb["yes_source"]
-                no_source = best_arb["no_source"]
-                
-                with st.expander("View Next Best Matches", expanded=False):
-                    for i, op in enumerate(top_opportunities[1:6], 1):
-                        st.write(f"**{i}. Implied Sum: {op['implied_sum']*100:.2f}%**")
-                        st.write(f"- BUY YES: {op['yes_source']} (Odds: {op['best_odds_yes']})")
-                        st.write(f"- BUY NO: {op['no_source']} (Odds: {op['best_odds_no']})")
-                        st.divider()
-            else:
-                st.warning("Could not find any overlapping markets with sufficient similarity. Try expanding category or depth.")
+            st.info(f"**🤖 Auto-Match Engine Identified Best Setup (Similarity: {best_arb['similarity']*100:.1f}%)**")
+            
+            odds_yes = best_arb["best_odds_yes"]
+            odds_no = best_arb["best_odds_no"]
+            yes_source = best_arb["yes_source"]
+            no_source = best_arb["no_source"]
+            
+            with st.expander("View Next Best Matches", expanded=False):
+                for i, op in enumerate(top_opportunities[1:6], 1):
+                    st.write(f"**{i}. Implied Sum: {op['implied_sum']*100:.2f}%**")
+                    st.write(f"- BUY YES: {op['yes_source']} (Odds: {op['best_odds_yes']})")
+                    st.write(f"- BUY NO: {op['no_source']} (Odds: {op['best_odds_no']})")
+                    st.divider()
         else:
-            st.error("Missing data from one of the platforms. Cannot run cross-matching.")
+            st.warning("Could not find any overlapping markets with sufficient similarity. Try expanding category or depth.")
+    else:
+        st.error("Missing data from one of the platforms. Cannot run cross-matching.")
 else:
     st.sidebar.subheader("Manual Odds Configuration")
     odds_yes = st.sidebar.number_input("Best YES Odds", min_value=1.01, value=7.10, step=0.05)
