@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import json
+from curl_cffi import requests as c_requests
 
 st.set_page_config(
     page_title="Prediction Market Arbitrage Scanner",
@@ -27,52 +28,41 @@ FALLBACK_KALSHI = [
 # ------------------------------------------------------------------
 @st.cache_data(ttl=60)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi public endpoints with Cloudflare fallback handling."""
-    endpoints = [
-        "https://external-api.kalshi.com/trade-api/v2/markets?limit=100",
-        "https://api.elections.kalshi.com/trade-api/v2/markets?limit=100",
-        "https://external-api.kalshi.com/trade-api/v2/events?limit=50&status=open"
-    ]
-    
+    """Fetch active markets from Kalshi using Chrome TLS impersonation to bypass Cloudflare."""
+    url = "https://external-api.kalshi.com/trade-api/v2/markets?limit=100&status=open"
     parsed = []
-    status_log = []
 
-    for url in endpoints:
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=6)
-            status_log.append(f"{url[:35]}... -> Code {resp.status_code}")
-            
-            if resp.status_code == 200:
-                body = resp.json()
-                
-                # Case 1: Direct /markets response
-                raw_markets = body.get("markets", [])
-                
-                # Case 2: Nested /events response
-                if not raw_markets and "events" in body:
-                    for ev in body.get("events", []):
-                        raw_markets.extend(ev.get("markets", []))
+    try:
+        # Impersonate Chrome 120 browser TLS fingerprint
+        resp = c_requests.get(
+            url, 
+            impersonate="chrome120", 
+            headers={"Accept": "application/json"}, 
+            timeout=10
+        )
+        
+        if resp.status_code == 200:
+            data = resp.json().get("markets", [])
+            for m in data:
+                title = m.get("title") or m.get("ticker") or "Unknown"
+                yes_ask = m.get("yes_ask", 0) or m.get("last_price", 0) or 0
+                no_ask = m.get("no_ask", 0) or (100 - yes_ask if yes_ask > 0 else 0)
 
-                for m in raw_markets:
-                    title = m.get("title") or m.get("ticker") or "Unknown"
-                    yes_ask = m.get("yes_ask", 0) or m.get("last_price", 0) or 0
-                    no_ask = m.get("no_ask", 0) or (100 - yes_ask if yes_ask > 0 else 0)
+                if yes_ask > 0 and no_ask > 0:
+                    parsed.append({
+                        "id": m.get("ticker", "N/A"),
+                        "title": title,
+                        "yes_odds": round(100.0 / yes_ask, 2),
+                        "no_odds": round(100.0 / no_ask, 2),
+                        "source": "Kalshi (Live API)"
+                    })
 
-                    if yes_ask > 0 and no_ask > 0:
-                        parsed.append({
-                            "id": m.get("ticker", "N/A"),
-                            "title": title,
-                            "yes_odds": round(100.0 / yes_ask, 2),
-                            "no_odds": round(100.0 / no_ask, 2),
-                            "source": "Kalshi (Live API)"
-                        })
-                
-                if parsed:
-                    return parsed, f"✅ Connected to Kalshi API ({len(parsed)} markets loaded)"
-        except Exception as e:
-            status_log.append(f"Error fetching {url[:30]}: {str(e)[:40]}")
+            if parsed:
+                return parsed, f"✅ Connected to Kalshi API via TLS Impersonation ({len(parsed)} markets loaded)"
+    except Exception as e:
+        pass
 
-    return FALLBACK_KALSHI, f"⚠️ Kalshi API blocked by Cloudflare on Streamlit Cloud IP. Loaded fallback dataset."
+    return FALLBACK_KALSHI, "⚠️ Kalshi API blocked. Loaded fallback dataset."
 
 @st.cache_data(ttl=60)
 def fetch_polymarket_markets():
