@@ -1,7 +1,6 @@
 import streamlit as st
 import requests
 import json
-from difflib import SequenceMatcher
 
 st.set_page_config(
     page_title="Prediction Market Arbitrage Scanner",
@@ -10,10 +9,9 @@ st.set_page_config(
 )
 
 # ------------------------------------------------------------------
-# Live Market API Fetchers
+# API Endpoints & Headers
 # ------------------------------------------------------------------
-# Pass query parameters directly to your worker so Kalshi returns active open markets
-KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/markets?limit=1000&status=open"
+KALSHI_PROXY_URL = "https://kalshi-proxy.soahum-golhar.workers.dev/markets?limit=200&status=open"
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 
 HEADERS = {
@@ -21,9 +19,12 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-@st.cache_data(ttl=180)
+# ------------------------------------------------------------------
+# Live Market API Fetchers
+# ------------------------------------------------------------------
+@st.cache_data(ttl=120)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi via Cloudflare Worker Proxy."""
+    """Fetch active markets from Kalshi with dollar/cent normalization & price fallbacks."""
     parsed = []
     try:
         resp = requests.get(KALSHI_PROXY_URL, timeout=12)
@@ -34,35 +35,45 @@ def fetch_kalshi_markets():
             for m in data:
                 title = m.get("title") or m.get("ticker") or "Unknown"
                 
-                # Kalshi prices are in cents (1 to 99)
-                yes_ask = m.get("yes_ask", 0) or m.get("last_price", 0) or 0
-                no_ask = m.get("no_ask", 0) or (100 - yes_ask if 0 < yes_ask < 100 else 0)
+                # 1. Extract raw price fields
+                raw_yes_ask = m.get("yes_ask") or m.get("last_price") or 0
+                raw_no_ask = m.get("no_ask") or 0
+                
+                if not raw_yes_ask or raw_yes_ask == 0:
+                    continue
 
-                if 0 < yes_ask < 100 and 0 < no_ask < 100:
+                # 2. Normalize cents vs dollars (e.g. 52.0 vs 0.52)
+                if raw_yes_ask > 1.0:
+                    p_yes = raw_yes_ask / 100.0
+                    p_no = (raw_no_ask / 100.0) if raw_no_ask > 0 else (1.0 - p_yes)
+                else:
+                    p_yes = float(raw_yes_ask)
+                    p_no = float(raw_no_ask) if raw_no_ask > 0 else (1.0 - p_yes)
+
+                # 3. Validate implied probability range
+                if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
                     parsed.append({
                         "id": m.get("ticker", "N/A"),
                         "title": title,
-                        "yes_price": yes_ask / 100.0,
-                        "no_price": no_ask / 100.0,
-                        "yes_odds": round(100.0 / yes_ask, 2),
-                        "no_odds": round(100.0 / no_ask, 2),
+                        "yes_price": round(p_yes, 4),
+                        "no_price": round(p_no, 4),
+                        "yes_odds": round(1.0 / p_yes, 2),
+                        "no_odds": round(1.0 / p_no, 2),
                         "source": "Kalshi"
                     })
 
             if parsed:
                 return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets)"
             else:
-                return [], "⚠️ Kalshi Worker returned empty market list."
+                return [], f"⚠️ Kalshi proxy returned 0 valid markets out of {len(data)} items."
         else:
             return [], f"❌ Kalshi Worker returned HTTP {resp.status_code}"
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
-@st.cache_data(ttl=180)
+@st.cache_data(ttl=120)
 def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
-    """
-    Fetch active markets from Polymarket Gamma API with pagination and category filtering.
-    """
+    """Fetch active markets from Polymarket Gamma API with pagination & tags."""
     parsed = []
     seen_ids = set()
     try:
@@ -70,7 +81,6 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
             offset = page * 100
             url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
             
-            # Apply Polymarket Tag Slug
             if category_slug != "all":
                 url += f"&tag_slug={category_slug}"
 
@@ -104,8 +114,8 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
                                         parsed.append({
                                             "id": m_id,
                                             "title": question,
-                                            "yes_price": p_yes,
-                                            "no_price": p_no,
+                                            "yes_price": round(p_yes, 4),
+                                            "no_price": round(p_no, 4),
                                             "yes_odds": round(1.0 / p_yes, 2),
                                             "no_odds": round(1.0 / p_no, 2),
                                             "source": "Polymarket"
@@ -118,7 +128,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
         if parsed:
             return parsed, f"✅ Connected to Polymarket ({len(parsed)} markets loaded)"
         else:
-            return [], f"⚠️ No markets found for category '{category_slug}'."
+            return [], f"⚠️ No active Polymarket items found for category '{category_slug}'."
     except Exception as e:
         return [], f"❌ Polymarket API Error: {e}"
 
@@ -164,12 +174,12 @@ if mode == "📡 Live Scanner":
     kalshi_list, k_status = fetch_kalshi_markets()
     poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=fetch_depth)
 
-    # Apply Client-Side Search Keyword Filter
+    # Client-side Keyword Search Filter
     if search_query:
         kalshi_list = [m for m in kalshi_list if search_query in m['title'].lower()]
         poly_list = [m for m in poly_list if search_query in m['title'].lower()]
 
-    with st.expander("🔍 Connection Diagnostics & Status", expanded=False):
+    with st.expander("🔍 Connection Diagnostics & Status", expanded=True):
         st.write(f"**Kalshi Status:** {k_status}")
         st.write(f"**Polymarket Status:** {p_status}")
 
@@ -195,7 +205,7 @@ if mode == "📡 Live Scanner":
             st.info("No matching Polymarket markets.")
             selected_p = None
 
-    # Determine Best Odds for Arbitrage Pair
+    # Determine Best Odds Pair across selections
     if selected_k and selected_p:
         if selected_k["yes_odds"] >= selected_p["yes_odds"]:
             odds_yes = selected_k["yes_odds"]
