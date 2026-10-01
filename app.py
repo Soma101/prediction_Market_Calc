@@ -19,7 +19,7 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_kalshi_markets():
     """Fetch active markets from Kalshi via your Cloudflare Worker Proxy."""
     parsed = []
@@ -52,7 +52,7 @@ def fetch_kalshi_markets():
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def fetch_polymarket_markets():
     """Fetch active markets from Polymarket Gamma REST API."""
     parsed = []
