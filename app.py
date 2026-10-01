@@ -20,11 +20,51 @@ HEADERS = {
 }
 
 # ------------------------------------------------------------------
-# Live Market API Fetchers
+# Robust Data Parsers
 # ------------------------------------------------------------------
+def safe_float(val):
+    """Safely converts string, int, or float values to float without throwing exceptions."""
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
+
+def extract_kalshi_prices(m):
+    """
+    Extracts normalized YES/NO prices (0.0 to 1.0) handling:
+    1. Fixed-point string dollar fields (e.g. 'yes_ask_dollars': '0.5200')
+    2. Legacy numeric/string cent fields (e.g. 'yes_ask': 52 or '52')
+    3. Order book fallbacks (yes_bid, last_price) when top-of-book ask is missing
+    """
+    # 1. Check fixed-point dollar string fields first
+    yes_dollar_str = m.get("yes_ask_dollars") or m.get("yes_bid_dollars") or m.get("last_price_dollars")
+    no_dollar_str = m.get("no_ask_dollars") or m.get("no_bid_dollars")
+
+    p_yes = safe_float(yes_dollar_str)
+    p_no = safe_float(no_dollar_str)
+
+    # 2. Fallback to legacy fields if dollar strings are absent
+    if p_yes == 0.0:
+        raw_yes = safe_float(m.get("yes_ask")) or safe_float(m.get("yes_bid")) or safe_float(m.get("last_price"))
+        p_yes = raw_yes / 100.0 if raw_yes > 1.0 else raw_yes
+
+    if p_no == 0.0:
+        raw_no = safe_float(m.get("no_ask")) or safe_float(m.get("no_bid"))
+        p_no = raw_no / 100.0 if raw_no > 1.0 else raw_no
+
+    # 3. Derive missing side using complementary probability (1.0 - price)
+    if p_yes > 0 and p_no == 0:
+        p_no = round(1.0 - p_yes, 4)
+    elif p_no > 0 and p_yes == 0:
+        p_yes = round(1.0 - p_no, 4)
+
+    return p_yes, p_no
+
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi with dollar/cent normalization & price fallbacks."""
+    """Fetch active markets from Kalshi with type conversion & price normalization."""
     parsed = []
     try:
         resp = requests.get(KALSHI_PROXY_URL, timeout=12)
@@ -34,23 +74,9 @@ def fetch_kalshi_markets():
             
             for m in data:
                 title = m.get("title") or m.get("ticker") or "Unknown"
-                
-                # 1. Extract raw price fields
-                raw_yes_ask = m.get("yes_ask") or m.get("last_price") or 0
-                raw_no_ask = m.get("no_ask") or 0
-                
-                if not raw_yes_ask or raw_yes_ask == 0:
-                    continue
+                p_yes, p_no = extract_kalshi_prices(m)
 
-                # 2. Normalize cents vs dollars (e.g. 52.0 vs 0.52)
-                if raw_yes_ask > 1.0:
-                    p_yes = raw_yes_ask / 100.0
-                    p_no = (raw_no_ask / 100.0) if raw_no_ask > 0 else (1.0 - p_yes)
-                else:
-                    p_yes = float(raw_yes_ask)
-                    p_no = float(raw_no_ask) if raw_no_ask > 0 else (1.0 - p_yes)
-
-                # 3. Validate implied probability range
+                # Validate implied probability range (1% to 99%)
                 if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
                     parsed.append({
                         "id": m.get("ticker", "N/A"),
@@ -63,7 +89,7 @@ def fetch_kalshi_markets():
                     })
 
             if parsed:
-                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets)"
+                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets loaded)"
             else:
                 return [], f"⚠️ Kalshi proxy returned 0 valid markets out of {len(data)} items."
         else:
