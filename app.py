@@ -165,7 +165,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=5):
         return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
-# Auto-Matching Arbitrage Engine (Caching Removed for Stability)
+# Auto-Matching Arbitrage Engine
 # ------------------------------------------------------------------
 STOP_WORDS = {
     "will", "happen", "the", "and", "for", "that", "this", "with", "from",
@@ -183,8 +183,7 @@ def tokenize_title(text):
     return set(w for w in words if len(w) >= 3 and w not in STOP_WORDS)
 
 def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
-    if not kalshi_markets or not poly_markets:
-        return []
+    if not kalshi_markets or not poly_markets: return []
 
     poly_index = defaultdict(list)
     for p in poly_markets:
@@ -284,7 +283,7 @@ def calculate_arbitrage_metrics(odds_yes, odds_no, budget, fee_pct):
 st.title("⚖️ Prediction Market Arbitrage Scanner")
 st.caption("Auto-matches cross-platform markets to guarantee mathematically optimal spread setups.")
 
-st.sidebar.header("⚙️ Controls")
+st.sidebar.header("⚙️️ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️ Manual Custom Odds"])
 
 st.sidebar.subheader("🎯 Market Configuration")
@@ -307,8 +306,9 @@ poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value
 budget = st.sidebar.number_input("Total Investment ($)", min_value=1.0, value=100.0, step=10.0)
 fee_pct = st.sidebar.number_input("Platform Fee on Profit (%)", min_value=0.0, max_value=20.0, value=0.0, step=0.5)
 
-if st.sidebar.button("🔄 Force Refresh API Data"):
+if st.sidebar.button("🗑️ Clear Cache & Reset Data"):
     st.cache_data.clear()
+    st.session_state['run_scan'] = False
     st.rerun()
 
 odds_yes = 7.10
@@ -317,51 +317,56 @@ yes_source = "Manual Entry"
 no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner (Auto-Match)":
-    # THE SPINNER ENSURES VISUAL FEEDBACK ON RERUNS
-    with st.spinner(f"🔄 Fetching and scanning [{selected_cat_label}] markets. Please wait..."):
-        raw_kalshi_list, k_status = fetch_kalshi_markets(pages_to_fetch=kalshi_pages)
-        poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages)
+    
+    # --- DEFER API FETCHING UNTIL BUTTON CLICK ---
+    if st.button("🚀 Run Arbitrage Scan", type="primary", use_container_width=True):
+        st.session_state['run_scan'] = True
 
-        kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
-        
-        # Display Status After Fetch
-        st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
+    if st.session_state.get('run_scan', False):
+        with st.spinner(f"🔄 Fetching and scanning [{selected_cat_label}] markets. Please wait..."):
+            raw_kalshi_list, k_status = fetch_kalshi_markets(pages_to_fetch=kalshi_pages)
+            poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages)
 
-        if kalshi_list and poly_list:
-            top_opportunities = find_best_arbitrage(kalshi_list, poly_list)
-            
-            if arb_only:
-                top_opportunities = [op for op in top_opportunities if op['implied_sum'] < 1.0]
-            
-            if top_opportunities:
-                best_arb = top_opportunities[0]
-                odds_yes = best_arb["best_odds_yes"]
-                odds_no = best_arb["best_odds_no"]
-                yes_source = best_arb["yes_source"]
-                no_source = best_arb["no_source"]
+            kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
+            st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
+
+            if kalshi_list and poly_list:
+                top_opportunities = find_best_arbitrage(kalshi_list, poly_list)
                 
-                with st.expander("✅ View Top Matches & Execution Plans", expanded=True):
-                    for i, op in enumerate(top_opportunities[:10], 1): 
-                        s_yes, s_no, n_prof = calculate_arbitrage_metrics(op['best_odds_yes'], op['best_odds_no'], budget, fee_pct)
-                        
-                        if n_prof > 0:
-                            profit_badge = f"🟢 **Guaranteed Profit: +${n_prof:.2f}**"
-                        else:
-                            profit_badge = f"🔴 **Net Loss: ${n_prof:.2f}**"
-
-                        st.markdown(f"#### {i}. Implied Sum: {op['implied_sum']*100:.2f}% | {profit_badge}")
-                        st.write(f"- **BUY YES:** {op['yes_source']}")
-                        st.write(f"  - **Odds:** {op['best_odds_yes']} | **Stake:** ${s_yes:.2f}")
-                        st.write(f"- **BUY NO:** {op['no_source']}")
-                        st.write(f"  - **Odds:** {op['best_odds_no']} | **Stake:** ${s_no:.2f}")
-                        st.divider()
-            else:
                 if arb_only:
-                    st.warning("No pure arbitrage opportunities (S < 100%) found at current market prices. Uncheck 'Only Show Guaranteed Arbitrage' to view limit-order candidates.")
+                    top_opportunities = [op for op in top_opportunities if op['implied_sum'] < 1.0]
+                
+                if top_opportunities:
+                    best_arb = top_opportunities[0]
+                    odds_yes = best_arb["best_odds_yes"]
+                    odds_no = best_arb["best_odds_no"]
+                    yes_source = best_arb["yes_source"]
+                    no_source = best_arb["no_source"]
+                    
+                    with st.expander("✅ View Top Matches & Execution Plans", expanded=True):
+                        for i, op in enumerate(top_opportunities[:10], 1): 
+                            s_yes, s_no, n_prof = calculate_arbitrage_metrics(op['best_odds_yes'], op['best_odds_no'], budget, fee_pct)
+                            
+                            if n_prof > 0:
+                                profit_badge = f"🟢 **Guaranteed Profit: +${n_prof:.2f}**"
+                            else:
+                                profit_badge = f"🔴 **Net Loss: ${n_prof:.2f}**"
+
+                            st.markdown(f"#### {i}. Implied Sum: {op['implied_sum']*100:.2f}% | {profit_badge}")
+                            st.write(f"- **BUY YES:** {op['yes_source']}")
+                            st.write(f"  - **Odds:** {op['best_odds_yes']} | **Stake:** ${s_yes:.2f}")
+                            st.write(f"- **BUY NO:** {op['no_source']}")
+                            st.write(f"  - **Odds:** {op['best_odds_no']} | **Stake:** ${s_no:.2f}")
+                            st.divider()
                 else:
-                    st.warning("Could not find any overlapping markets with sufficient similarity. Try expanding category or depth.")
-        else:
-            st.error("Missing data from one of the platforms. Cannot run cross-matching.")
+                    if arb_only:
+                        st.warning("No pure arbitrage opportunities (S < 100%) found at current market prices. Uncheck 'Only Show Guaranteed Arbitrage' to view limit-order candidates.")
+                    else:
+                        st.warning("Could not find any overlapping markets with sufficient similarity. Try expanding category or depth.")
+            else:
+                st.error("Missing data from one of the platforms. Cannot run cross-matching.")
+    else:
+        st.info("👆 Click **'Run Arbitrage Scan'** to fetch data and find market mismatches.")
 else:
     st.sidebar.subheader("Manual Odds Configuration")
     odds_yes = st.sidebar.number_input("Best YES Odds", min_value=1.01, value=7.10, step=0.05)
