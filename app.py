@@ -20,82 +20,106 @@ HEADERS = {
 }
 
 # ------------------------------------------------------------------
-# Robust Data Parsers
+# Kalshi Reciprocal Binary Price Engine
 # ------------------------------------------------------------------
-def safe_float(val):
-    """Safely converts string, int, or float values to float without throwing exceptions."""
-    if val is None:
-        return 0.0
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return 0.0
-
-def extract_kalshi_prices(m):
+def parse_kalshi_market_prices(m):
     """
-    Extracts normalized YES/NO prices (0.0 to 1.0) handling:
-    1. Fixed-point string dollar fields (e.g. 'yes_ask_dollars': '0.5200')
-    2. Legacy numeric/string cent fields (e.g. 'yes_ask': 52 or '52')
-    3. Order book fallbacks (yes_bid, last_price) when top-of-book ask is missing
+    Extracts YES/NO buy prices (0.01 to 0.99) using Kalshi's binary duality:
+    - YES Ask (Buy YES) = 1.00 - NO Bid
+    - NO Ask  (Buy NO)  = 1.00 - YES Bid
+    Safely converts string, integer, or float inputs.
     """
-    # 1. Check fixed-point dollar string fields first
-    yes_dollar_str = m.get("yes_ask_dollars") or m.get("yes_bid_dollars") or m.get("last_price_dollars")
-    no_dollar_str = m.get("no_ask_dollars") or m.get("no_bid_dollars")
+    def to_float(val):
+        if val is None:
+            return 0.0
+        try:
+            v = float(str(val).strip())
+            # Convert legacy cents to dollars if v > 1.0 (e.g. 42 -> 0.42)
+            return v / 100.0 if v > 1.0 else v
+        except (ValueError, TypeError):
+            return 0.0
 
-    p_yes = safe_float(yes_dollar_str)
-    p_no = safe_float(no_dollar_str)
+    # Extract all candidate price fields (dollar strings or legacy floats)
+    yes_bid = to_float(m.get("yes_bid_dollars") or m.get("yes_bid"))
+    no_bid  = to_float(m.get("no_bid_dollars") or m.get("no_bid"))
+    yes_ask = to_float(m.get("yes_ask_dollars") or m.get("yes_ask"))
+    no_ask  = to_float(m.get("no_ask_dollars") or m.get("no_ask"))
+    last_p  = to_float(m.get("last_price_dollars") or m.get("last_price"))
 
-    # 2. Fallback to legacy fields if dollar strings are absent
-    if p_yes == 0.0:
-        raw_yes = safe_float(m.get("yes_ask")) or safe_float(m.get("yes_bid")) or safe_float(m.get("last_price"))
-        p_yes = raw_yes / 100.0 if raw_yes > 1.0 else raw_yes
+    # 1. Compute YES Ask (Cost to Buy YES)
+    if yes_ask > 0:
+        p_yes = yes_ask
+    elif no_bid > 0:
+        p_yes = 1.0 - no_bid  # Reciprocal rule
+    elif last_p > 0:
+        p_yes = last_p
+    elif yes_bid > 0:
+        p_yes = yes_bid
+    else:
+        p_yes = 0.0
 
-    if p_no == 0.0:
-        raw_no = safe_float(m.get("no_ask")) or safe_float(m.get("no_bid"))
-        p_no = raw_no / 100.0 if raw_no > 1.0 else raw_no
+    # 2. Compute NO Ask (Cost to Buy NO)
+    if no_ask > 0:
+        p_no = no_ask
+    elif yes_bid > 0:
+        p_no = 1.0 - yes_bid  # Reciprocal rule
+    elif last_p > 0:
+        p_no = 1.0 - last_p
+    elif no_bid > 0:
+        p_no = no_bid
+    else:
+        p_no = 0.0
 
-    # 3. Derive missing side using complementary probability (1.0 - price)
-    if p_yes > 0 and p_no == 0:
-        p_no = round(1.0 - p_yes, 4)
-    elif p_no > 0 and p_yes == 0:
-        p_yes = round(1.0 - p_no, 4)
+    # Bound check within valid probability limits
+    p_yes = round(p_yes, 4) if 0.001 <= p_yes <= 0.999 else 0.0
+    p_no  = round(p_no, 4) if 0.001 <= p_no <= 0.999 else 0.0
 
     return p_yes, p_no
 
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets():
-    """Fetch active markets from Kalshi with type conversion & price normalization."""
+    """Fetch active markets from Kalshi with reciprocal price derivation."""
     parsed = []
+    raw_sample = None
     try:
         resp = requests.get(KALSHI_PROXY_URL, timeout=12)
         if resp.status_code == 200:
             raw = resp.json()
-            data = raw.get("markets", []) if isinstance(raw, dict) else raw
             
-            for m in data:
-                title = m.get("title") or m.get("ticker") or "Unknown"
-                p_yes, p_no = extract_kalshi_prices(m)
+            # Robust dict/list unwrapping
+            if isinstance(raw, dict):
+                data = raw.get("markets") or raw.get("data") or []
+            elif isinstance(raw, list):
+                data = raw
+            else:
+                data = []
 
-                # Validate implied probability range (1% to 99%)
-                if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
+            if data and len(data) > 0:
+                raw_sample = data[0]
+
+            for m in data:
+                title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
+                p_yes, p_no = parse_kalshi_market_prices(m)
+
+                if p_yes > 0 and p_no > 0:
                     parsed.append({
                         "id": m.get("ticker", "N/A"),
                         "title": title,
-                        "yes_price": round(p_yes, 4),
-                        "no_price": round(p_no, 4),
+                        "yes_price": p_yes,
+                        "no_price": p_no,
                         "yes_odds": round(1.0 / p_yes, 2),
                         "no_odds": round(1.0 / p_no, 2),
                         "source": "Kalshi"
                     })
 
             if parsed:
-                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets loaded)"
+                return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets loaded)", raw_sample
             else:
-                return [], f"⚠️ Kalshi proxy returned 0 valid markets out of {len(data)} items."
+                return [], f"⚠️ Kalshi proxy returned {len(data)} items, but 0 had active bid/ask pricing.", raw_sample
         else:
-            return [], f"❌ Kalshi Worker returned HTTP {resp.status_code}"
+            return [], f"❌ Kalshi Worker returned HTTP {resp.status_code}", None
     except Exception as e:
-        return [], f"❌ Connection error to Kalshi Worker: {e}"
+        return [], f"❌ Connection error to Kalshi Worker: {e}", None
 
 @st.cache_data(ttl=120)
 def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
@@ -159,16 +183,14 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=3):
         return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
-# UI & Controls
+# UI & Layout Controls
 # ------------------------------------------------------------------
 st.title("⚖️ Prediction Market Arbitrage Scanner")
 st.caption("Real-time cross-exchange market scanner for Kalshi and Polymarket.")
 
-# Sidebar Controls
 st.sidebar.header("⚙️ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner", "✏️ Manual Custom Odds"])
 
-# Category & Depth Filters
 st.sidebar.subheader("🎯 Market Category & Search")
 category_map = {
     "All Markets": "all",
@@ -197,7 +219,7 @@ yes_source = "Manual Entry"
 no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner":
-    kalshi_list, k_status = fetch_kalshi_markets()
+    kalshi_list, k_status, k_sample = fetch_kalshi_markets()
     poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=fetch_depth)
 
     # Client-side Keyword Search Filter
@@ -205,9 +227,12 @@ if mode == "📡 Live Scanner":
         kalshi_list = [m for m in kalshi_list if search_query in m['title'].lower()]
         poly_list = [m for m in poly_list if search_query in m['title'].lower()]
 
-    with st.expander("🔍 Connection Diagnostics & Status", expanded=True):
+    with st.expander("🔍 Connection Diagnostics & Status", expanded=False):
         st.write(f"**Kalshi Status:** {k_status}")
         st.write(f"**Polymarket Status:** {p_status}")
+        if k_sample:
+            st.caption("Raw Kalshi Market Structure Sample:")
+            st.json(k_sample)
 
     col_k, col_p = st.columns(2)
 
