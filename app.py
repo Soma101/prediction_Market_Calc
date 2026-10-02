@@ -101,20 +101,48 @@ def matches_kalshi_category(market, cat_slug):
 # Live API Fetchers (With Native & Keyword Filters)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True, min_volume=0.0):
+def parse_kalshi_market_prices(m):
+    """Fallback price parser: uses asks first, then last_price / midpoint if asks are empty."""
+    def to_float(val):
+        if val is None: return 0.0
+        try:
+            v = float(str(val).strip())
+            return v / 100.0 if v > 1.0 else v
+        except (ValueError, TypeError):
+            return 0.0
+
+    yes_ask = to_float(m.get("yes_ask_dollars") or m.get("yes_ask"))
+    no_ask  = to_float(m.get("no_ask_dollars") or m.get("no_ask"))
+    last_p  = to_float(m.get("last_price_dollars") or m.get("last_price"))
+    yes_bid = to_float(m.get("yes_bid_dollars") or m.get("yes_bid"))
+
+    # Try live ask prices first
+    p_yes = yes_ask if 0.01 <= yes_ask <= 0.99 else 0.0
+    p_no  = no_ask  if 0.01 <= no_ask <= 0.99  else 0.0
+
+    # Fallback to last price or bid complement if orderbook ask is missing
+    if p_yes == 0.0 and 0.01 <= last_p <= 0.99:
+        p_yes = last_p
+    if p_no == 0.0 and p_yes > 0.0:
+        p_no = round(1.0 - p_yes, 4)
+    if p_yes == 0.0 and p_no > 0.0:
+        p_yes = round(1.0 - p_no, 4)
+
+    if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
+        return round(p_yes, 4), round(p_no, 4)
+    return 0.0, 0.0
+
+@st.cache_data(ttl=120)
+def fetch_kalshi_markets(pages_to_fetch=5, ignore_live=True, min_volume=0.0):
     parsed = []
     cursor = ""
-    
-    live_keywords = [
-        "(live)", "[live]", " live ", "in-play", "in play", " live:", 
-        "1st half", "2nd half", "first half", "second half", "halftime",
-        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter"
-    ]
 
     try:
         for page in range(pages_to_fetch):
-            url = KALSHI_MARKETS_URL
-            if cursor: url += f"?cursor={cursor}"
+            # Pass limit=1000 and status=open to retrieve full pages
+            url = f"{KALSHI_MARKETS_URL}?limit=1000&status=open"
+            if cursor: 
+                url += f"&cursor={cursor}"
                 
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
@@ -123,25 +151,13 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True, min_volume=0.0):
 
                 for m in data:
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
-                    event_ticker = str(m.get("event_ticker", "")).lower()
 
-                    # Live Game Filter
-                    if ignore_live:
-                        if m.get("in_play") is True or m.get("is_in_play") is True:
-                            continue
-                        title_lower = title.lower()
-                        if any(kw in title_lower for kw in live_keywords):
-                            continue
-                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay", "q1", "q2", "q3", "q4", "h1", "h2"]):
-                            continue
+                    if ignore_live and (m.get("in_play") is True or m.get("is_in_play") is True):
+                        continue
 
-                    # Volume & Liquidity Filter
-                    vol = float(m.get("dollar_volume") or m.get("volume_fp") or m.get("volume") or 0)
-                    if vol > 1000 and "dollar_volume" not in m: vol /= 100.0
-                    liq = float(m.get("liquidity") or 0)
-                    if liq > 1000: liq /= 100.0
-
-                    if min_volume > 0 and max(vol, liq) < min_volume:
+                    # Adjust for contract count vs dollar volume
+                    vol = float(m.get("volume") or m.get("dollar_volume") or 0)
+                    if min_volume > 0 and vol < min_volume:
                         continue
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
