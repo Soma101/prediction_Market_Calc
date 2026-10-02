@@ -88,6 +88,15 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
     parsed = []
     cursor = ""
     page = 0
+    
+    # Aggressive keyword filter for in-play period betting
+    live_keywords = [
+        "(live)", "[live]", " live ", "in-play", "in play", " live:", 
+        "1st half", "2nd half", "first half", "second half", "halftime",
+        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter", 
+        "first quarter", "second quarter", "third quarter", "fourth quarter"
+    ]
+    
     try:
         for page in range(pages_to_fetch):
             url = f"{KALSHI_PROXY_URL}?limit=1000&status=open&mve_filter=exclude"
@@ -108,10 +117,10 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
                             is_live = True
                             
                         title_lower = title.lower()
-                        if any(kw in title_lower for kw in ["(live)", "[live]", " live ", "in-play", "in play", " live:"]):
+                        if any(kw in title_lower for kw in live_keywords):
                             is_live = True
                             
-                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay"]):
+                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay", "q1", "q2", "q3", "q4", "h1", "h2"]):
                             is_live = True
                             
                         # Deep Filter: Subtitle check & nested tags
@@ -151,6 +160,17 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
 def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=True):
     parsed = []
     seen_ids = set()
+    
+    live_keywords = [
+        "(live)", "[live]", " live ", "in-play", "live prop", 
+        "1st half", "2nd half", "first half", "second half", "halftime",
+        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter",
+        "first quarter", "second quarter", "third quarter", "fourth quarter"
+    ]
+    
+    # Broadened sports terms to catch specific league acronyms 
+    sports_terms = ["sport", "nfl", "nba", "mlb", "nhl", "soccer", "football", "basketball", "tennis", "mma", "ufc", "cricket", "rugby", "f1"]
+
     try:
         for page in range(pages_to_fetch):
             offset = page * 100
@@ -173,22 +193,26 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                             is_live = True
                             
                         ev_title_lower = event_title.lower()
-                        if any(kw in ev_title_lower for kw in ["(live)", "[live]", " live ", "in-play", "live prop"]):
+                        if any(kw in ev_title_lower for kw in live_keywords):
                             is_live = True
                             
                         if any(kw in event_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-", "-liveprop"]):
                             is_live = True
                             
-                        # Deep Filter: Tag array
                         tags = ev.get("tags", [])
                         if any(str(tag).lower() in ["live", "in-play", "in play"] for tag in tags):
                             is_live = True
                             
-                        # Deep Filter: Event start time comparison (Sports games already underway)
+                        # Broadened Category Time-Cutoff Check
                         category = str(ev.get("category", "")).lower()
                         start_date = ev.get("startDate") or ev.get("gameStartTime")
                         
-                        if "sport" in category and start_date:
+                        # Check if category OR any tag matches our sports terms list
+                        is_sports_event = any(st in category for st in sports_terms)
+                        if not is_sports_event:
+                            is_sports_event = any(st in str(tag).lower() for tag in tags for st in sports_terms)
+                        
+                        if is_sports_event and start_date:
                             try:
                                 event_start = datetime.strptime(start_date[:19], "%Y-%m-%dT%H:%M:%S")
                                 if event_start < datetime.utcnow():
@@ -214,7 +238,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                                 m_is_live = True
                                 
                             q_lower = question.lower()
-                            if any(kw in q_lower for kw in ["(live)", "[live]", " live ", "in-play"]):
+                            if any(kw in q_lower for kw in live_keywords):
                                 m_is_live = True
                                 
                             if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
@@ -432,7 +456,7 @@ def calculate_arbitrage_metrics(odds_yes, odds_no, budget, fee_pct):
 # ------------------------------------------------------------------
 # UI & Layout Controls
 # ------------------------------------------------------------------
-st.title("⚖️️ Prediction Market Arbitrage Scanner")
+st.title("⚖ Prediction Market Arbitrage Scanner")
 st.caption("Auto-matches cross-platform markets to guarantee mathematically optimal spread setups.")
 
 st.sidebar.header("⚙ Controls")
