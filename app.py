@@ -179,41 +179,36 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                         if min_liquidity > 0 and usd_liquidity < min_liquidity:
                             continue
 
+                        # Dynamic Outcome-to-Price Mapping
                         raw_prices = m.get("outcomePrices")
                         raw_outcomes = m.get("outcomes")
                         
-                        if raw_prices:
+                        if raw_prices and raw_outcomes:
                             try:
                                 prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                                
-                                # Safe parsing for outcomes with null check
-                                outcomes_list = ["Option A", "Option B"]
-                                if raw_outcomes:
-                                    parsed_outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
-                                    if parsed_outcomes and len(parsed_outcomes) >= 2:
-                                        outcomes_list = parsed_outcomes
-                                    
-                                if prices and len(prices) >= 2:
+                                outcomes_list = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+                        
+                                p_yes, p_no = 0.0, 0.0
+                        
+                                for outcome_label, price_val in zip(outcomes_list, prices):
+                                    label_clean = str(outcome_label).strip().lower()
+                                    p_float = float(price_val)
+                        
+                                    if any(w in label_clean for w in ["yes", "over"]):
+                                        p_yes = p_float
+                                    elif any(w in label_clean for w in ["no", "under"]):
+                                        p_no = p_float
+                        
+                                # Fallback if outcome names are non-standard
+                                if p_yes == 0.0 and p_no == 0.0 and len(prices) >= 2:
                                     p_yes, p_no = float(prices[0]), float(prices[1])
-                                    if p_yes > 0 and p_no > 0:
-                                        parsed.append({
-                                            "id": m_id,
-                                            "title": question or event_title or "Unknown",
-                                            "p_yes": p_yes,
-                                            "p_no": p_no,
-                                            "yes_odds": 1.0 / p_yes,
-                                            "no_odds": 1.0 / p_no,
-                                            "yes_name": str(outcomes_list[0]),
-                                            "no_name": str(outcomes_list[1]),
-                                            "usd_liquidity": usd_liquidity,
-                                            "source": "Polymarket"
-                                        })
+                        
                             except Exception:
                                 continue
-            else: break
-        return parsed, f"✅ Polymarket: {len(parsed)} liquid markets loaded natively for [{tag_id or 'All'}]"
-    except Exception as e:
-        return [], f"❌ Polymarket API Error: {e}"
+                                    else: break
+                                return parsed, f"✅ Polymarket: {len(parsed)} liquid markets loaded natively for [{tag_id or 'All'}]"
+                            except Exception as e:
+                                return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
 # Auto-Matching Arbitrage Engine
