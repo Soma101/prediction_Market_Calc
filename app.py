@@ -203,6 +203,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
 
     best_pairs = []
     seen_pair_keys = set()
+    matched_poly_ids = set()  # Track already matched Polymarket IDs to reduce time complexity
 
     for k in kalshi_markets:
         k_tokens = tokenize_title(k['title'])
@@ -216,6 +217,8 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
         for token in k_tokens:
             for p in poly_index[token]:
                 pid = p['id']
+                if pid in matched_poly_ids: 
+                    continue  # Short-circuit 1: skip already matched candidates
                 candidate_counts[pid] += 1
                 candidate_objs[pid] = p
 
@@ -226,6 +229,9 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
         best_score = 0.0
 
         for pid, count in candidate_counts.items():
+            if pid in matched_poly_ids:
+                continue
+
             p = candidate_objs[pid]
             p_tokens = p['tokens']
             p_numbers = p['numbers']
@@ -253,11 +259,17 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
             if combined_score > best_score and seq_score >= min_similarity:
                 best_score = combined_score
                 best_match = p
+                
+                # Short-circuit 2: Early exit on high confidence match to save difflib computations
+                if combined_score >= 0.90:
+                    break
 
         if best_match:
             pair_key = f"{k['id']}_{best_match['id']}"
             if pair_key in seen_pair_keys: continue
+            
             seen_pair_keys.add(pair_key)
+            matched_poly_ids.add(best_match['id'])  # Lock this market from future Kalshi checks
 
             implied_sum_A = (1.0 / k['yes_odds']) + (1.0 / best_match['no_odds'])
             implied_sum_B = (1.0 / best_match['yes_odds']) + (1.0 / k['no_odds'])
