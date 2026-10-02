@@ -52,7 +52,7 @@ def parse_kalshi_market_prices(m):
     if 0 < no_ask < 1.0: p_no = no_ask
     elif 0 < yes_bid < 1.0: p_no = 1.0 - yes_bid
     elif 0 < no_bid < 1.0: p_no = no_bid
-    elif 0 < last_p < 1.0: p_no = 1.0 - last_p
+    elif 0 < last_p < 1.0: p_no = last_p
     else: p_no = 0.0
 
     if p_yes > 0 and p_no == 0: p_no = round(1.0 - p_yes, 4)
@@ -80,7 +80,7 @@ def matches_kalshi_category(market, cat_slug):
     return True
 
 # ------------------------------------------------------------------
-# Live API Fetchers
+# Live API Fetchers (Strict In-Play Detection)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
@@ -99,13 +99,18 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
 
                 for m in data:
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
+                    event_ticker = str(m.get("event_ticker", "")).lower()
                     
-                    # Live game filter
+                    # Strict Live Game Filter for Kalshi
                     if ignore_live:
-                        if m.get("in_play") is True:
+                        if m.get("in_play") is True or m.get("is_in_play") is True:
+                            continue
+                        if m.get("status") == "active" and m.get("can_close_early") is True:
                             continue
                         title_lower = title.lower()
-                        if "(live)" in title_lower or "[live]" in title_lower or " live " in title_lower:
+                        if any(kw in title_lower for kw in ["(live)", "[live]", " live ", "in-play", "in play", " live:"]):
+                            continue
+                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay"]):
                             continue
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
@@ -146,11 +151,17 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                 
                 for ev in events:
                     event_title = ev.get("title", "")
+                    event_slug = str(ev.get("slug", "")).lower()
                     
-                    # Live game filter on event level
+                    # Strict Live Game Filter for Polymarket Events
                     if ignore_live:
+                        if ev.get("live") is True or ev.get("isLive") is True:
+                            continue
                         ev_title_lower = event_title.lower()
-                        if "(live)" in ev_title_lower or "[live]" in ev_title_lower:
+                        if any(kw in ev_title_lower for kw in ["(live)", "[live]", " live ", "in-play", "live prop"]):
+                            continue
+                        # Polymarket live props always use quarter/period/live slug tags
+                        if any(kw in event_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-", "-liveprop"]):
                             continue
 
                     markets = ev.get("markets", [])
@@ -160,11 +171,16 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                         seen_ids.add(m_id)
                         
                         question = m.get("question", "")
+                        market_slug = str(m.get("slug", "")).lower()
 
-                        # Live game filter on market level
+                        # Strict Live Game Filter for Polymarket Individual Props
                         if ignore_live:
+                            if m.get("live") is True or m.get("isLive") is True:
+                                continue
                             q_lower = question.lower()
-                            if "(live)" in q_lower or "[live]" in q_lower:
+                            if any(kw in q_lower for kw in ["(live)", "[live]", " live ", "in-play"]):
+                                continue
+                            if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
                                 continue
 
                         raw_prices = m.get("outcomePrices")
@@ -209,23 +225,19 @@ CONFLICT_GROUPS = [
 ]
 
 def clean_text_for_match(text):
-    # Standardize numbers with commas first (e.g. 1,000 -> 1000)
     text = re.sub(r'(\d+),(\d+)', r'\1\2', text.lower())
     text = re.sub(r'[^a-z0-9\s\.]', ' ', text).strip()
     return re.sub(r'\s+', ' ', text)
 
 def extract_numbers(text):
-    """Extract numeric lines/targets while separating out season years."""
     clean_text = re.sub(r'(\d+),(\d+)', r'\1\2', text)
     all_nums = set(re.findall(r'\b\d+(?:\.\d+)?\b', clean_text))
     
-    # Filter out common season/year markers
     years = {n for n in all_nums if n in {"2024", "2025", "2026", "2027", "2028", "24", "25", "26", "27", "28"}}
     lines = all_nums - years
     return lines, years
 
 def tokenize_title(text):
-    """Extract key entity tokens only (ignoring dates, numbers, and boilerplate)."""
     clean = clean_text_for_match(text)
     words = clean.split()
     return set(
@@ -236,7 +248,6 @@ def tokenize_title(text):
     )
 
 def has_entity_conflict(tokens_a, tokens_b):
-    """Prevents matching opposing candidates in the same market group."""
     for group in CONFLICT_GROUPS:
         a_matches = tokens_a & group
         b_matches = tokens_b & group
@@ -254,7 +265,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
         p['tokens'] = tokenize_title(p['title'])
         p['lines'], p['years'] = extract_numbers(p['title'])
         
-        # Index ONLY by core subject tokens (ignoring numbers and generic words)
         for token in p['tokens']:
             poly_index[token].append(p)
 
@@ -267,7 +277,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
         k_raw_tokens = set(k_clean.split())
         k_tokens = tokenize_title(k['title'])
         
-        # If no unique subject tokens remain (e.g. title is purely generic text), skip
         if not k_tokens: continue
 
         k_lines, k_years = extract_numbers(k['title'])
@@ -275,7 +284,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
         candidate_counts = defaultdict(int)
         candidate_objs = {}
 
-        # Look up candidates based on shared subject tokens ONLY
         for token in k_tokens:
             for p in poly_index.get(token, []):
                 pid = p['id']
@@ -294,43 +302,33 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             
             p = candidate_objs[pid]
 
-            # Rule 1: MUST share at least 1 core subject entity token (e.g. "darnell", "washington")
             shared_entities = k_tokens & p['tokens']
             if not shared_entities:
                 continue
 
-            # Rule 2: Line Check. If BOTH titles specify target numbers, at least one line must overlap,
-            # or equivalent line logic must hold (e.g. 0.5 vs 1).
             if k_lines and p['lines']:
-                # Convert string lines to float sets for flexible matching
                 k_floats = {float(x) for x in k_lines}
                 p_floats = {float(x) for x in p['lines']}
                 
-                # Check for direct match or 0.5 rounding equivalents (e.g. 0.5 vs 1)
                 direct_match = bool(k_floats & p_floats)
                 half_point_match = any(abs(kf - pf) <= 0.5 for kf in k_floats for pf in p_floats)
                 
                 if not (direct_match or half_point_match):
                     continue
 
-            # Rule 3: Strict Year/Season Check
             if k_years and p['years'] and not (k_years & p['years']):
                 continue
 
-            # Rule 4: Entity Conflict Override
             if has_entity_conflict(k_raw_tokens, p['raw_tokens']):
                 continue
 
-            # Rule 5: Token Similarity Ratio
             intersection = len(k_tokens & p['tokens'])
             union = len(k_tokens | p['tokens'])
             jaccard_score = intersection / union if union > 0 else 0.0
 
-            # Rule 6: String Sequence Matcher
             p_clean = clean_text_for_match(p['title'])
             seq_score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
             
-            # Weighted combined score
             combined_score = (jaccard_score * 0.60) + (seq_score * 0.40)
 
             if combined_score > best_score and combined_score >= min_similarity:
