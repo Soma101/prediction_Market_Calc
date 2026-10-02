@@ -3,7 +3,7 @@ import requests
 import json
 import difflib
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from collections import defaultdict
 import pandas as pd
 
@@ -74,7 +74,7 @@ def parse_kalshi_market_prices(m):
     return 0.0, 0.0
 
 # ------------------------------------------------------------------
-# Live API Fetchers (Native Filters & Timestamp Checks)
+# Live API Fetchers
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min_liquidity=0.0):
@@ -96,7 +96,6 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
 
                     if ignore_live:
-                        # Strictly relies on native API boolean check for live games
                         if m.get("in_play") is True or m.get("is_in_play") is True:
                             continue
 
@@ -143,9 +142,6 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min
 def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, min_liquidity=0.0):
     parsed = []
     seen_ids = set()
-    
-    # ISO 8601 current timestamp for start_date_min query parameter
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         for page in range(pages_to_fetch):
@@ -153,10 +149,6 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
             url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
             if tag_id is not None:
                 url += f"&tag_id={tag_id}"
-
-            if ignore_live:
-                # Direct API filter asking Polymarket for future-starting events only
-                url += f"&start_date_min={now_iso}"
 
             resp = requests.get(url, headers=HEADERS, timeout=10)
             if resp.status_code == 200:
@@ -193,12 +185,15 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                         if raw_prices:
                             try:
                                 prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
-                                outcomes_list = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
                                 
-                                if not outcomes_list or len(outcomes_list) < 2:
-                                    outcomes_list = ["Option A", "Option B"]
+                                # Safe parsing for outcomes with null check
+                                outcomes_list = ["Option A", "Option B"]
+                                if raw_outcomes:
+                                    parsed_outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+                                    if parsed_outcomes and len(parsed_outcomes) >= 2:
+                                        outcomes_list = parsed_outcomes
                                     
-                                if len(prices) >= 2:
+                                if prices and len(prices) >= 2:
                                     p_yes, p_no = float(prices[0]), float(prices[1])
                                     if p_yes > 0 and p_no > 0:
                                         parsed.append({
@@ -213,7 +208,7 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                                             "usd_liquidity": usd_liquidity,
                                             "source": "Polymarket"
                                         })
-                            except:
+                            except Exception:
                                 continue
             else: break
         return parsed, f"✅ Polymarket: {len(parsed)} liquid markets loaded natively for [{tag_id or 'All'}]"
@@ -347,7 +342,6 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             seen_pair_keys.add(pair_key)
             matched_poly_ids.add(best_match['id'])
 
-            # Direct probabilities access with odds fallback to prevent KeyError
             k_p_yes = k.get('p_yes', 1.0 / k['yes_odds'])
             k_p_no  = k.get('p_no', 1.0 / k['no_odds'])
             p_p_yes = best_match.get('p_yes', 1.0 / best_match['yes_odds'])
