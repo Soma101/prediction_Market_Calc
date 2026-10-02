@@ -130,8 +130,8 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min
                             "title": title,
                             "category": m.get("category", "General"),
                             "ticker": m.get("ticker", ""),
-                            "yes_odds": round(1.0 / p_yes, 2),
-                            "no_odds": round(1.0 / p_no, 2),
+                            "yes_odds": 1.0 / p_yes,  # Full precision
+                            "no_odds": 1.0 / p_no,    # Full precision
                             "usd_liquidity": usd_liquidity,
                             "source": "Kalshi"
                         })
@@ -210,8 +210,8 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                                         parsed.append({
                                             "id": m_id,
                                             "title": question or event_title or "Unknown",
-                                            "yes_odds": round(1.0 / p_yes, 2),
-                                            "no_odds": round(1.0 / p_no, 2),
+                                            "yes_odds": 1.0 / p_yes,  # Full precision
+                                            "no_odds": 1.0 / p_no,    # Full precision
                                             "usd_liquidity": usd_liquidity,
                                             "source": "Polymarket"
                                         })
@@ -348,9 +348,9 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             
             seen_pair_keys.add(pair_key)
             matched_poly_ids.add(best_match['id'])
-
-            implied_sum_A = (1.0 / k['yes_odds']) + (1.0 / best_match['no_odds'])
-            implied_sum_B = (1.0 / best_match['yes_odds']) + (1.0 / k['no_odds'])
+            # Exact implied sum directly from contract prices
+            implied_sum_A = k['p_yes'] + best_match['p_no']
+            implied_sum_B = best_match['p_yes'] + k['p_no']
 
             if implied_sum_A < implied_sum_B:
                 best_pairs.append({
