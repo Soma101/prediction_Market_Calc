@@ -23,7 +23,7 @@ KALSHI_STATUS_URL = f"{KALSHI_PROXY_BASE}/exchange/status"
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json"
 }
 
@@ -43,66 +43,10 @@ def check_kalshi_status():
         return True, True
 
 def parse_kalshi_market_prices(m):
-    """Robust multi-field Kalshi odds parser (handles dollars, cents, bids, and asks)."""
+    """Fallback price parser: uses asks first, then last_price / midpoint if asks are empty."""
     if m.get("strike_type") == "custom" or "mve_selected_legs" in m or "mve_collection_ticker" in m:
         return 0.0, 0.0
 
-    def to_float(val):
-        if val is None: return 0.0
-        try:
-            v = float(str(val).strip())
-            return v / 100.0 if v > 1.0 else v
-        except (ValueError, TypeError):
-            return 0.0
-
-    yes_bid = to_float(m.get("yes_bid_dollars") or m.get("yes_bid"))
-    no_bid  = to_float(m.get("no_bid_dollars") or m.get("no_bid"))
-    yes_ask = to_float(m.get("yes_ask_dollars") or m.get("yes_ask"))
-    no_ask  = to_float(m.get("no_ask_dollars") or m.get("no_ask"))
-    last_p  = to_float(m.get("last_price_dollars") or m.get("last_price"))
-
-    if 0 < yes_ask < 1.0: p_yes = yes_ask
-    elif 0 < no_bid < 1.0: p_yes = 1.0 - no_bid
-    elif 0 < yes_bid < 1.0: p_yes = yes_bid
-    elif 0 < last_p < 1.0: p_yes = last_p
-    else: p_yes = 0.0
-
-    if 0 < no_ask < 1.0: p_no = no_ask
-    elif 0 < yes_bid < 1.0: p_no = 1.0 - yes_bid
-    elif 0 < no_bid < 1.0: p_no = no_bid
-    elif 0 < last_p < 1.0: p_no = 1.0 - last_p
-    else: p_no = 0.0
-
-    if p_yes > 0 and p_no == 0: p_no = round(1.0 - p_yes, 4)
-    elif p_no > 0 and p_yes == 0: p_yes = round(1.0 - p_no, 4)
-
-    if 0.01 <= p_yes <= 0.99 and 0.01 <= p_no <= 0.99:
-        return round(p_yes, 4), round(p_no, 4)
-    return 0.0, 0.0
-
-def matches_kalshi_category(market, cat_slug):
-    if cat_slug == "all": return True
-    title, category = str(market.get("title", "")).lower(), str(market.get("category", "")).lower()
-    ticker, event_ticker = str(market.get("ticker", "")).lower(), str(market.get("event_ticker", "")).lower()
-
-    if cat_slug == "tennis":
-        return any(kw in title or kw in ticker for kw in ["tennis", "wta", "atp", "open", "slam", "djokovic", "alcaraz", "swiatek", "sinner"])
-    elif cat_slug == "sports":
-        return "sport" in category or any(kw in title or kw in ticker or kw in event_ticker for kw in ["sport", "nba", "nfl", "mlb", "nhl", "soccer", "basketball", "ufc", "f1"])
-    elif cat_slug == "politics":
-        return "politic" in category or any(kw in title or kw in ticker for kw in ["politic", "election", "president", "trump", "biden", "senate", "congress"])
-    elif cat_slug == "crypto":
-        return any(c in category for c in ["crypto", "economic", "financial"]) or any(kw in title or kw in ticker for kw in ["crypto", "bitcoin", "btc", "ethereum", "fed", "rate", "cpi"])
-    elif cat_slug == "pop-culture":
-        return any(c in category for c in ["culture", "entertainment"]) or any(kw in title or kw in ticker for kw in ["movie", "oscar", "grammy", "box office", "emmy"])
-    return True
-
-# ------------------------------------------------------------------
-# Live API Fetchers (With Native & Keyword Filters)
-# ------------------------------------------------------------------
-@st.cache_data(ttl=120)
-def parse_kalshi_market_prices(m):
-    """Fallback price parser: uses asks first, then last_price / midpoint if asks are empty."""
     def to_float(val):
         if val is None: return 0.0
         try:
@@ -132,15 +76,26 @@ def parse_kalshi_market_prices(m):
         return round(p_yes, 4), round(p_no, 4)
     return 0.0, 0.0
 
+# ------------------------------------------------------------------
+# Live API Fetchers (Native Category Integration)
+# ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(pages_to_fetch=5, ignore_live=True, min_volume=0.0):
+def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_volume=0.0):
     parsed = []
     cursor = ""
+    
+    live_keywords = [
+        "(live)", "[live]", " live ", "in-play", "in play", " live:", 
+        "1st half", "2nd half", "first half", "second half", "halftime",
+        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter"
+    ]
 
     try:
         for page in range(pages_to_fetch):
-            # Pass limit=1000 and status=open to retrieve full pages
+            # API-level category filtering drastically reduces fetch times
             url = f"{KALSHI_MARKETS_URL}?limit=1000&status=open"
+            if category: 
+                url += f"&category={category}"
             if cursor: 
                 url += f"&cursor={cursor}"
                 
@@ -151,16 +106,30 @@ def fetch_kalshi_markets(pages_to_fetch=5, ignore_live=True, min_volume=0.0):
 
                 for m in data:
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
+                    event_ticker = str(m.get("event_ticker", "")).lower()
 
-                    if ignore_live and (m.get("in_play") is True or m.get("is_in_play") is True):
-                        continue
-
-                    # Adjust for contract count vs dollar volume
-                    vol = float(m.get("volume") or m.get("dollar_volume") or 0)
-                    if min_volume > 0 and vol < min_volume:
-                        continue
+                    # Live Game Filter
+                    if ignore_live:
+                        if m.get("in_play") is True or m.get("is_in_play") is True:
+                            continue
+                        title_lower = title.lower()
+                        if any(kw in title_lower for kw in live_keywords):
+                            continue
+                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay", "q1", "q2", "q3", "q4", "h1", "h2"]):
+                            continue
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
+
+                    # Normalize Kalshi Volume to USD
+                    raw_dollar_vol = m.get("dollar_volume")
+                    if raw_dollar_vol is not None:
+                        usd_volume = float(raw_dollar_vol)
+                    else:
+                        contracts = float(m.get("volume") or 0)
+                        usd_volume = contracts * (p_yes if p_yes > 0 else 0.5)
+
+                    if min_volume > 0 and usd_volume < min_volume:
+                        continue
 
                     if p_yes > 0 and p_no > 0:
                         parsed.append({
@@ -170,18 +139,19 @@ def fetch_kalshi_markets(pages_to_fetch=5, ignore_live=True, min_volume=0.0):
                             "ticker": m.get("ticker", ""),
                             "yes_odds": round(1.0 / p_yes, 2),
                             "no_odds": round(1.0 / p_no, 2),
+                            "usd_volume": usd_volume,
                             "source": "Kalshi"
                         })
                 cursor = raw.get("cursor")
                 if not cursor: break
             else: break
                 
-        return parsed, f"✅ Connected to Kalshi ({len(parsed)} active markets loaded)"
+        return parsed, f"✅ Kalshi: {len(parsed)} markets loaded natively for [{category or 'All'}]"
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
 @st.cache_data(ttl=120)
-def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, min_volume=0.0):
+def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, min_volume=0.0):
     parsed = []
     seen_ids = set()
     
@@ -194,6 +164,7 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
     try:
         for page in range(pages_to_fetch):
             offset = page * 100
+            # API-level category (tag) filtering
             url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
             if tag_id is not None:
                 url += f"&tag_id={tag_id}"
@@ -232,10 +203,9 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
                             if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
                                 continue
 
-                        # Volume Filter
-                        vol = float(m.get("volume") or ev.get("volume") or 0)
+                        usd_volume = float(m.get("volume") or ev.get("volume") or 0)
                         liq = float(m.get("liquidity") or ev.get("liquidity") or 0)
-                        if min_volume > 0 and max(vol, liq) < min_volume:
+                        if min_volume > 0 and max(usd_volume, liq) < min_volume:
                             continue
 
                         raw_prices = m.get("outcomePrices")
@@ -250,12 +220,13 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
                                             "title": question or event_title or "Unknown",
                                             "yes_odds": round(1.0 / p_yes, 2),
                                             "no_odds": round(1.0 / p_no, 2),
+                                            "usd_volume": usd_volume,
                                             "source": "Polymarket"
                                         })
                             except:
                                 continue
             else: break
-        return parsed, f"✅ Connected to Polymarket ({len(parsed)} markets loaded)"
+        return parsed, f"✅ Polymarket: {len(parsed)} markets loaded natively for [{tag_id or 'All'}]"
     except Exception as e:
         return [], f"❌ Polymarket API Error: {e}"
 
@@ -446,24 +417,39 @@ else:
 st.sidebar.header("⚙ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️ Manual Custom Odds"])
 
-st.sidebar.subheader("🎯 Market Configuration")
-category_maps = {
-    "All Markets": {"kalshi": "all", "poly_tag": None},
-    "🎾 Tennis": {"kalshi": "tennis", "poly_tag": 864},
-    "⚽ Sports (General)": {"kalshi": "sports", "poly_tag": 100639},
-    "🏛️ Politics": {"kalshi": "politics", "poly_tag": 2},
-    "📈 Crypto & Finance": {"kalshi": "crypto", "poly_tag": 21},
-    "🍿 Pop Culture": {"kalshi": "pop-culture", "poly_tag": 596}
-}
+st.sidebar.subheader("🎯 Native Market Categories")
+st.sidebar.caption("API-level filtering drastically reduces loading times.")
 
-selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_maps.keys()))
-kalshi_cat = category_maps[selected_cat_label]["kalshi"]
-poly_tag = category_maps[selected_cat_label]["poly_tag"]
+# Unified vs Split Native Category Engine
+category_mode = st.sidebar.radio("Category Routing", ["Auto-Mapped (Both Platforms)", "Split Custom (Independent)"])
 
+if category_mode == "Auto-Mapped (Both Platforms)":
+    category_maps = {
+        "All Markets": {"kalshi": None, "poly_tag": None},
+        "🎾 Tennis": {"kalshi": "sports", "poly_tag": 864}, 
+        "⚽ Sports (General)": {"kalshi": "sports", "poly_tag": 100639},
+        "🏛️ Politics": {"kalshi": "politics", "poly_tag": 2},
+        "📈 Crypto & Finance": {"kalshi": "crypto", "poly_tag": 21},
+        "🍿 Pop Culture": {"kalshi": "culture", "poly_tag": 596}
+    }
+    selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_maps.keys()))
+    kalshi_cat = category_maps[selected_cat_label]["kalshi"]
+    poly_tag = category_maps[selected_cat_label]["poly_tag"]
+else:
+    kalshi_native_cats = {"All": None, "Politics": "politics", "Crypto": "crypto", "Economics": "economics", "Sports": "sports", "Culture": "culture", "Science": "science"}
+    poly_native_tags = {"All": None, "Politics": 2, "Crypto": 21, "Sports": 100639, "Tennis": 864, "Pop Culture": 596, "Science": 133}
+    
+    k_label = st.sidebar.selectbox("Kalshi API Category", list(kalshi_native_cats.keys()))
+    p_label = st.sidebar.selectbox("Polymarket API Tag", list(poly_native_tags.keys()))
+    
+    kalshi_cat = kalshi_native_cats[k_label]
+    poly_tag = poly_native_tags[p_label]
+
+st.sidebar.divider()
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
 ignore_live = st.sidebar.checkbox("Ignore Live/In-Play Games", value=True)
 
-min_volume = st.sidebar.number_input("Min Volume / Liquidity ($)", min_value=0.0, value=100.0, step=100.0)
+min_volume = st.sidebar.number_input("Min Volume / Liquidity (USD $)", min_value=0.0, value=100.0, step=100.0)
 match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=75, step=1) / 100.0
 
 kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
@@ -489,11 +475,12 @@ if mode == "📡 Live Scanner (Auto-Match)":
         st.session_state['run_scan'] = True
 
     if st.session_state.get('run_scan', False):
-        with st.spinner(f"🔄 Fetching and scanning [{selected_cat_label}] markets..."):
-            raw_kalshi_list, k_status = fetch_kalshi_markets(pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_volume=min_volume)
+        with st.spinner(f"🔄 Fetching markets directly from API categories..."):
+            
+            # Categories are now passed directly to the fetchers to eliminate downloading unrelated bulk data
+            kalshi_list, k_status = fetch_kalshi_markets(category=kalshi_cat, pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_volume=min_volume)
             poly_list, p_status = fetch_polymarket_markets(tag_id=poly_tag, pages_to_fetch=poly_pages, ignore_live=ignore_live, min_volume=min_volume)
 
-            kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, kalshi_cat)]
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
 
             if kalshi_list and poly_list:
