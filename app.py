@@ -77,10 +77,10 @@ def parse_kalshi_market_prices(m):
     return 0.0, 0.0
 
 # ------------------------------------------------------------------
-# Live API Fetchers (Native Category Integration)
+# Live API ers (Native Category Integration)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_volume=0.0):
+def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_liquidity=0.0):
     parsed = []
     cursor = ""
     
@@ -92,7 +92,6 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
     try:
         for page in range(pages_to_fetch):
-            # API-level category filtering drastically reduces fetch times
             url = f"{KALSHI_MARKETS_URL}?limit=1000&status=open"
             if category: 
                 url += f"&category={category}"
@@ -108,7 +107,6 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
                     event_ticker = str(m.get("event_ticker", "")).lower()
 
-                    # Live Game Filter
                     if ignore_live:
                         if m.get("in_play") is True or m.get("is_in_play") is True:
                             continue
@@ -120,15 +118,17 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
 
-                    # Normalize Kalshi Volume to USD
-                    raw_dollar_vol = m.get("dollar_volume")
-                    if raw_dollar_vol is not None:
-                        usd_volume = float(raw_dollar_vol)
+                    # STRICT Liquidity Check (Kalshi measures liquidity natively in cents)
+                    raw_liq = m.get("liquidity")
+                    if raw_liq is not None:
+                        usd_liquidity = float(raw_liq) / 100.0
                     else:
-                        contracts = float(m.get("volume") or 0)
-                        usd_volume = contracts * (p_yes if p_yes > 0 else 0.5)
+                        # Fallback to resting ask depth if main liquidity key is missing
+                        yes_depth = float(m.get("yes_ask_depth") or 0)
+                        no_depth = float(m.get("no_ask_depth") or 0)
+                        usd_liquidity = (yes_depth + no_depth) / 100.0
 
-                    if min_volume > 0 and usd_volume < min_volume:
+                    if min_liquidity > 0 and usd_liquidity < min_liquidity:
                         continue
 
                     if p_yes > 0 and p_no > 0:
@@ -139,19 +139,19 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
                             "ticker": m.get("ticker", ""),
                             "yes_odds": round(1.0 / p_yes, 2),
                             "no_odds": round(1.0 / p_no, 2),
-                            "usd_volume": usd_volume,
+                            "usd_liquidity": usd_liquidity,
                             "source": "Kalshi"
                         })
                 cursor = raw.get("cursor")
                 if not cursor: break
             else: break
                 
-        return parsed, f"✅ Kalshi: {len(parsed)} markets loaded natively for [{category or 'All'}]"
+        return parsed, f"✅ Kalshi: {len(parsed)} liquid markets loaded natively for [{category or 'All'}]"
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
 @st.cache_data(ttl=120)
-def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, min_volume=0.0):
+def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, min_liquidity=0.0):
     parsed = []
     seen_ids = set()
     
@@ -164,7 +164,6 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, mi
     try:
         for page in range(pages_to_fetch):
             offset = page * 100
-            # API-level category (tag) filtering
             url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
             if tag_id is not None:
                 url += f"&tag_id={tag_id}"
@@ -203,9 +202,10 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, mi
                             if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
                                 continue
 
-                        usd_volume = float(m.get("volume") or ev.get("volume") or 0)
-                        liq = float(m.get("liquidity") or ev.get("liquidity") or 0)
-                        if min_volume > 0 and max(usd_volume, liq) < min_volume:
+                        # STRICT Liquidity Check (Polymarket measures liquidity natively in dollars)
+                        usd_liquidity = float(m.get("liquidity") or 0)
+                        
+                        if min_liquidity > 0 and usd_liquidity < min_liquidity:
                             continue
 
                         raw_prices = m.get("outcomePrices")
@@ -220,13 +220,13 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, mi
                                             "title": question or event_title or "Unknown",
                                             "yes_odds": round(1.0 / p_yes, 2),
                                             "no_odds": round(1.0 / p_no, 2),
-                                            "usd_volume": usd_volume,
+                                            "usd_liquidity": usd_liquidity,
                                             "source": "Polymarket"
                                         })
                             except:
                                 continue
             else: break
-        return parsed, f"✅ Polymarket: {len(parsed)} markets loaded natively for [{tag_id or 'All'}]"
+        return parsed, f"✅ Polymarket: {len(parsed)} liquid markets loaded natively for [{tag_id or 'All'}]"
     except Exception as e:
         return [], f"❌ Polymarket API Error: {e}"
 
