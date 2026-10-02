@@ -3,6 +3,7 @@ import requests
 import json
 import difflib
 import re
+from datetime import datetime
 from collections import defaultdict
 
 st.set_page_config(
@@ -80,7 +81,7 @@ def matches_kalshi_category(market, cat_slug):
     return True
 
 # ------------------------------------------------------------------
-# Live API Fetchers (Strict In-Play Detection)
+# Live API Fetchers (Deep Live Game & In-Play Detection)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
@@ -89,7 +90,6 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
     page = 0
     try:
         for page in range(pages_to_fetch):
-            # Ensure status=open is used here
             url = f"{KALSHI_PROXY_URL}?limit=1000&status=open&mve_filter=exclude"
             if cursor: url += f"&cursor={cursor}"
                 
@@ -102,15 +102,29 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
                     event_ticker = str(m.get("event_ticker", "")).lower()
                     
-                    # Corrected Live Game Filter for Kalshi
                     if ignore_live:
-                        # Rely strictly on Kalshi's actual in_play boolean and naming conventions
+                        is_live = False
                         if m.get("in_play") is True or m.get("is_in_play") is True:
-                            continue
+                            is_live = True
+                            
                         title_lower = title.lower()
                         if any(kw in title_lower for kw in ["(live)", "[live]", " live ", "in-play", "in play", " live:"]):
-                            continue
+                            is_live = True
+                            
                         if any(kw in event_ticker for kw in ["-live", "live-", "inplay"]):
+                            is_live = True
+                            
+                        # Deep Filter: Subtitle check & nested tags
+                        yes_sub = str(m.get("yes_sub_title", "")).lower()
+                        no_sub = str(m.get("no_sub_title", "")).lower()
+                        if "(live)" in yes_sub or "(live)" in no_sub:
+                            is_live = True
+                            
+                        tags = m.get("tags", [])
+                        if any("live" in str(t).lower() for t in tags):
+                            is_live = True
+                            
+                        if is_live:
                             continue
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
@@ -153,15 +167,36 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                     event_title = ev.get("title", "")
                     event_slug = str(ev.get("slug", "")).lower()
                     
-                    # Strict Live Game Filter for Polymarket Events
                     if ignore_live:
+                        is_live = False
                         if ev.get("live") is True or ev.get("isLive") is True:
-                            continue
+                            is_live = True
+                            
                         ev_title_lower = event_title.lower()
                         if any(kw in ev_title_lower for kw in ["(live)", "[live]", " live ", "in-play", "live prop"]):
-                            continue
-                        # Polymarket live props always use quarter/period/live slug tags
+                            is_live = True
+                            
                         if any(kw in event_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-", "-liveprop"]):
+                            is_live = True
+                            
+                        # Deep Filter: Tag array
+                        tags = ev.get("tags", [])
+                        if any(str(tag).lower() in ["live", "in-play", "in play"] for tag in tags):
+                            is_live = True
+                            
+                        # Deep Filter: Event start time comparison (Sports games already underway)
+                        category = str(ev.get("category", "")).lower()
+                        start_date = ev.get("startDate") or ev.get("gameStartTime")
+                        
+                        if "sport" in category and start_date:
+                            try:
+                                event_start = datetime.strptime(start_date[:19], "%Y-%m-%dT%H:%M:%S")
+                                if event_start < datetime.utcnow():
+                                    is_live = True
+                            except:
+                                pass
+                                
+                        if is_live:
                             continue
 
                     markets = ev.get("markets", [])
@@ -173,14 +208,19 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=
                         question = m.get("question", "")
                         market_slug = str(m.get("slug", "")).lower()
 
-                        # Strict Live Game Filter for Polymarket Individual Props
                         if ignore_live:
+                            m_is_live = False
                             if m.get("live") is True or m.get("isLive") is True:
-                                continue
+                                m_is_live = True
+                                
                             q_lower = question.lower()
                             if any(kw in q_lower for kw in ["(live)", "[live]", " live ", "in-play"]):
-                                continue
+                                m_is_live = True
+                                
                             if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
+                                m_is_live = True
+                                
+                            if m_is_live:
                                 continue
 
                         raw_prices = m.get("outcomePrices")
@@ -212,7 +252,6 @@ STOP_WORDS = {
     "have", "more", "than", "before", "after", "does", "what", "when", 
     "where", "who", "which", "yes", "no", "market", "a", "an", "is", "be", 
     "to", "in", "on", "of", "by", "at", "or", "over", "under", "total", "ou",
-    # Generic sports & market structure boilerplate
     "regular", "season", "game", "games", "per", "leader", "leaders", "most", 
     "least", "first", "second", "quarter", "half", "nfl", "nba", "mlb", "nhl", 
     "wta", "atp", "player", "team", "stats", "award", "winner", "champion"
@@ -393,7 +432,7 @@ def calculate_arbitrage_metrics(odds_yes, odds_no, budget, fee_pct):
 # ------------------------------------------------------------------
 # UI & Layout Controls
 # ------------------------------------------------------------------
-st.title("⚖️ Prediction Market Arbitrage Scanner")
+st.title("⚖️️ Prediction Market Arbitrage Scanner")
 st.caption("Auto-matches cross-platform markets to guarantee mathematically optimal spread setups.")
 
 st.sidebar.header("⚙ Controls")
