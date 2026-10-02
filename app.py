@@ -169,6 +169,12 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                         seen_ids.add(m_id)
                         
                         question = m.get("question", "")
+                        
+                        # Build full descriptive title so threshold info isn't lost
+                        if event_title and question and question.lower() not in event_title.lower():
+                            full_title = f"{event_title}: {question}"
+                        else:
+                            full_title = question or event_title or "Unknown"
 
                         if ignore_live:
                             if m.get("live") is True or m.get("isLive") is True:
@@ -186,7 +192,6 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                             try:
                                 prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
                                 
-                                # Safe parsing for outcomes with null check
                                 outcomes_list = ["Option A", "Option B"]
                                 if raw_outcomes:
                                     parsed_outcomes = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
@@ -195,31 +200,40 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                                 
                                 if prices and len(prices) >= 2:
                                     p_yes, p_no = 0.0, 0.0
+                                    yes_name = str(outcomes_list[0])
+                                    no_name = str(outcomes_list[1])
                                     
-                                    # Dynamic Outcome-to-Price Mapping
                                     for outcome_label, price_val in zip(outcomes_list, prices):
                                         label_clean = str(outcome_label).strip().lower()
                                         p_float = float(price_val)
                                         
                                         if any(w in label_clean for w in ["yes", "over"]):
                                             p_yes = p_float
+                                            yes_name = str(outcome_label)
                                         elif any(w in label_clean for w in ["no", "under"]):
                                             p_no = p_float
+                                            no_name = str(outcome_label)
                                             
-                                    # Fallback if outcome names are non-standard
                                     if p_yes == 0.0 and p_no == 0.0:
                                         p_yes, p_no = float(prices[0]), float(prices[1])
+                                        yes_name = str(outcomes_list[0])
+                                        no_name = str(outcomes_list[1])
+
+                                    if p_yes > 0 and p_no == 0.0 and p_yes < 1.0:
+                                        p_no = round(1.0 - p_yes, 4)
+                                    elif p_no > 0 and p_yes == 0.0 and p_no < 1.0:
+                                        p_yes = round(1.0 - p_no, 4)
 
                                     if p_yes > 0 and p_no > 0:
                                         parsed.append({
                                             "id": m_id,
-                                            "title": question or event_title or "Unknown",
+                                            "title": full_title,
                                             "p_yes": p_yes,
                                             "p_no": p_no,
                                             "yes_odds": 1.0 / p_yes,
                                             "no_odds": 1.0 / p_no,
-                                            "yes_name": str(outcomes_list[0]),
-                                            "no_name": str(outcomes_list[1]),
+                                            "yes_name": yes_name,
+                                            "no_name": no_name,
                                             "usd_liquidity": usd_liquidity,
                                             "source": "Polymarket"
                                         })
@@ -255,12 +269,20 @@ def clean_text_for_match(text):
     text = re.sub(r'[^a-z0-9\s\.]', ' ', text).strip()
     return re.sub(r'\s+', ' ', text)
 
-def extract_numbers(text):
-    clean_text = re.sub(r'(\d+),(\d+)', r'\1\2', text)
-    all_nums = set(re.findall(r'\b\d+(?:\.\d+)?\b', clean_text))
-    years = {n for n in all_nums if n in {"2024", "2025", "2026", "2027", "2028", "24", "25", "26", "27", "28"}}
-    lines = all_nums - years
-    return lines, years
+def extract_threshold_numbers(text):
+    """Extracts explicit threshold digits (e.g., '4+' or '5+') from titles."""
+    clean_text = re.sub(r'(\d+),(\d+)', r'\1\2', text.lower())
+    raw_nums = re.findall(r'\b\d+(?:\.\d+)?\b', clean_text)
+    years = {"2024", "2025", "2026", "2027", "2028", "24", "25", "26", "27", "28"}
+    
+    thresholds = set()
+    for n in raw_nums:
+        if n not in years:
+            try:
+                thresholds.add(float(n))
+            except ValueError:
+                pass
+    return thresholds
 
 def tokenize_title(text):
     clean = clean_text_for_match(text)
@@ -288,7 +310,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
         p_clean = clean_text_for_match(p['title'])
         p['raw_tokens'] = set(p_clean.split())
         p['tokens'] = tokenize_title(p['title'])
-        p['lines'], p['years'] = extract_numbers(p['title'])
+        p['lines'] = extract_threshold_numbers(p['title'])
         
         for token in p['tokens']:
             poly_index[token].append(p)
@@ -303,7 +325,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
         k_tokens = tokenize_title(k['title'])
         
         if not k_tokens: continue
-        k_lines, k_years = extract_numbers(k['title'])
+        k_lines = extract_threshold_numbers(k['title'])
 
         candidate_counts = defaultdict(int)
         candidate_objs = {}
@@ -327,14 +349,14 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             shared_entities = k_tokens & p['tokens']
             if not shared_entities: continue
 
-            if k_lines and p['lines']:
-                k_floats = {float(x) for x in k_lines}
-                p_floats = {float(x) for x in p['lines']}
-                direct_match = bool(k_floats & p_floats)
-                half_point_match = any(abs(kf - pf) <= 0.5 for kf in k_floats for pf in p_floats)
-                if not (direct_match or half_point_match): continue
+            # Strict threshold matching rule:
+            # If threshold numbers exist on either market, BOTH must have them and they MUST match!
+            if k_lines or p['lines']:
+                if not k_lines or not p['lines']:
+                    continue
+                if not (k_lines & p['lines']):
+                    continue
 
-            if k_years and p['years'] and not (k_years & p['years']): continue
             if has_entity_conflict(k_raw_tokens, p['raw_tokens']): continue
 
             intersection = len(k_tokens & p['tokens'])
@@ -380,7 +402,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
                     "implied_sum": implied_sum_B,
                     "best_odds_yes": round(1.0 / p_p_yes, 2),
                     "best_odds_no": round(1.0 / k_p_no, 2),
-                    "yes_source": f"Polymarket: {best_match['title']} ➡️️ [{best_match.get('yes_name', 'Yes')}]",
+                    "yes_source": f"Polymarket: {best_match['title']} ➡️ [{best_match.get('yes_name', 'Yes')}]",
                     "no_source": f"Kalshi: {k['title']} ➡️ [{k.get('no_name', 'No')}]",
                     "similarity": best_score
                 })
