@@ -89,7 +89,7 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
     page = 0
     try:
         for page in range(pages_to_fetch):
-            url = f"{KALSHI_PROXY_URL}?limit=1000&status=open&mve_filter=exclude"
+            url = f"{KALSHI_PROXY_URL}?limit=1000&status=active&mve_filter=exclude"
             if cursor: url += f"&cursor={cursor}"
                 
             resp = requests.get(url, timeout=10)
