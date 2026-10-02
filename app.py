@@ -83,7 +83,7 @@ def matches_kalshi_category(market, cat_slug):
 # Live API Fetchers
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(pages_to_fetch=2):
+def fetch_kalshi_markets(pages_to_fetch=1):
     parsed = []
     cursor = ""
     page = 0
@@ -120,7 +120,7 @@ def fetch_kalshi_markets(pages_to_fetch=2):
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
 @st.cache_data(ttl=120)
-def fetch_polymarket_markets(category_slug="all", pages_to_fetch=5):
+def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1):
     parsed = []
     seen_ids = set()
     try:
