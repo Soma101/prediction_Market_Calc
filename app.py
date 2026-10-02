@@ -92,9 +92,8 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
     try:
         for page in range(pages_to_fetch):
+            # Kalshi V2 API no longer accepts category filters in the URL.
             url = f"{KALSHI_MARKETS_URL}?limit=1000&status=open"
-            if category: 
-                url += f"&category={category}"
             if cursor: 
                 url += f"&cursor={cursor}"
                 
@@ -118,22 +117,18 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
 
-                    # SMART LIQUIDITY CASCADE:
-                    # Kalshi bulk API often omits 'liquidity' or 'depth' keys. 
-                    # We fall back to open_interest or volume (all measured in cents).
-                    raw_liq = m.get("liquidity")
-                    if raw_liq is not None:
-                        usd_liquidity = float(raw_liq) / 100.0
-                    else:
-                        yes_depth = float(m.get("yes_ask_depth") or 0)
-                        no_depth = float(m.get("no_ask_depth") or 0)
-                        if yes_depth > 0 or no_depth > 0:
-                            usd_liquidity = (yes_depth + no_depth) / 100.0
-                        else:
-                            # Fallback to Open Interest or Volume to prove the market is active
-                            vol = float(m.get("volume") or 0)
-                            oi = float(m.get("open_interest") or 0)
-                            usd_liquidity = max(vol, oi) / 100.0
+                    # SMART LIQUIDITY CASCADE FOR KALSHI V2:
+                    # V2 API uses _fp (fixed point string) suffixes for volume and open interest.
+                    # Since these represent $1.00 payout contracts, their number equals their max dollar value.
+                    try:
+                        vol_24h = float(m.get("volume_24h_fp", 0))
+                        vol_total = float(m.get("volume_fp", 0))
+                        open_int = float(m.get("open_interest_fp", 0))
+                        
+                        # Use whichever is highest to prove the market is active and liquid
+                        usd_liquidity = max(vol_24h, vol_total, open_int)
+                    except (ValueError, TypeError):
+                        usd_liquidity = 0.0
 
                     if min_liquidity > 0 and usd_liquidity < min_liquidity:
                         continue
@@ -153,7 +148,7 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
                 if not cursor: break
             else: break
                 
-        return parsed, f"✅ Kalshi: {len(parsed)} liquid markets loaded natively for [{category or 'All'}]"
+        return parsed, f"✅ Kalshi: {len(parsed)} liquid markets loaded (Fetched globally due to API V2 changes)"
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
