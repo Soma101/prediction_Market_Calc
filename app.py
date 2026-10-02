@@ -118,15 +118,22 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
 
-                    # STRICT Liquidity Check (Kalshi measures liquidity natively in cents)
+                    # SMART LIQUIDITY CASCADE:
+                    # Kalshi bulk API often omits 'liquidity' or 'depth' keys. 
+                    # We fall back to open_interest or volume (all measured in cents).
                     raw_liq = m.get("liquidity")
                     if raw_liq is not None:
                         usd_liquidity = float(raw_liq) / 100.0
                     else:
-                        # Fallback to resting ask depth if main liquidity key is missing
                         yes_depth = float(m.get("yes_ask_depth") or 0)
                         no_depth = float(m.get("no_ask_depth") or 0)
-                        usd_liquidity = (yes_depth + no_depth) / 100.0
+                        if yes_depth > 0 or no_depth > 0:
+                            usd_liquidity = (yes_depth + no_depth) / 100.0
+                        else:
+                            # Fallback to Open Interest or Volume to prove the market is active
+                            vol = float(m.get("volume") or 0)
+                            oi = float(m.get("open_interest") or 0)
+                            usd_liquidity = max(vol, oi) / 100.0
 
                     if min_liquidity > 0 and usd_liquidity < min_liquidity:
                         continue
