@@ -77,7 +77,7 @@ def parse_kalshi_market_prices(m):
     return 0.0, 0.0
 
 # ------------------------------------------------------------------
-# Live API ers (Native Category Integration)
+# Live API Fetchers (Native Category Integration)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_liquidity=0.0):
@@ -449,7 +449,7 @@ st.sidebar.divider()
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
 ignore_live = st.sidebar.checkbox("Ignore Live/In-Play Games", value=True)
 
-min_volume = st.sidebar.number_input("Min Volume / Liquidity (USD $)", min_value=0.0, value=100.0, step=100.0)
+min_liquidity = st.sidebar.number_input("Min Available Liquidity (USD $)", min_value=0.0, value=100.0, step=100.0)
 match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=75, step=1) / 100.0
 
 kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
@@ -478,8 +478,8 @@ if mode == "📡 Live Scanner (Auto-Match)":
         with st.spinner(f"🔄 Fetching markets directly from API categories..."):
             
             # Categories are now passed directly to the fetchers to eliminate downloading unrelated bulk data
-            kalshi_list, k_status = fetch_kalshi_markets(category=kalshi_cat, pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_volume=min_volume)
-            poly_list, p_status = fetch_polymarket_markets(tag_id=poly_tag, pages_to_fetch=poly_pages, ignore_live=ignore_live, min_volume=min_volume)
+            kalshi_list, k_status = fetch_kalshi_markets(category=kalshi_cat, pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_liquidity=min_liquidity)
+            poly_list, p_status = fetch_polymarket_markets(tag_id=poly_tag, pages_to_fetch=poly_pages, ignore_live=ignore_live, min_liquidity=min_liquidity)
 
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
 
