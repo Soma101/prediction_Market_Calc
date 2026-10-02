@@ -5,14 +5,17 @@ import pandas as pd
 import difflib
 
 # --- Constants & Endpoints ---
-KALSHI_PROXY_URL = "https://api.elections.kalshi.com/trade-api/v2/markets"
+# Using your Cloudflare worker base to avoid CORS/rate-limits and route appropriately
+KALSHI_PROXY_BASE = "https://kalshi-proxy.soahum-golhar.workers.dev"
+KALSHI_MARKETS_URL = f"{KALSHI_PROXY_BASE}/markets"
+KALSHI_STATUS_URL = f"{KALSHI_PROXY_BASE}/exchange/status"
+
 POLYMARKET_BASE_URL = "https://gamma-api.polymarket.com"
 HEADERS = {"Accept": "application/json"}
 
 # --- Helper Functions ---
 def parse_kalshi_market_prices(m):
     """Safely extracts Kalshi odds. Adjust keys depending on your exact proxy/API tier."""
-    # Assuming standard cents format (1 to 99)
     yes_price = m.get("yes_ask", 0) / 100.0
     no_price = m.get("no_ask", 0) / 100.0
     return yes_price, no_price
@@ -29,6 +32,18 @@ def similarity(s1, s2):
     return difflib.SequenceMatcher(None, s1.lower(), s2.lower()).ratio()
 
 # --- Streamlined API Fetchers ---
+@st.cache_data(ttl=60)
+def check_kalshi_status():
+    """Checks the core exchange and trading status on Kalshi."""
+    try:
+        resp = requests.get(KALSHI_STATUS_URL, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("exchange_active", False), data.get("trading_active", False)
+        return False, False
+    except Exception:
+        return False, False
+
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True, min_volume=0.0):
     parsed = []
@@ -36,8 +51,10 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True, min_volume=0.0):
     
     try:
         for page in range(pages_to_fetch):
-            url = f"{KALSHI_PROXY_URL}?limit=100&status=open&mve_filter=exclude"
-            if cursor: url += f"&cursor={cursor}"
+            # Your CF Worker automatically appends limit, status, and mve_filter for /markets
+            url = KALSHI_MARKETS_URL
+            if cursor: 
+                url += f"?cursor={cursor}"
                 
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
@@ -45,11 +62,9 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True, min_volume=0.0):
                 data = raw.get("markets") or raw.get("data") or []
 
                 for m in data:
-                    # Rely purely on API's native in-play flag
                     if ignore_live and (m.get("in_play") is True or m.get("is_in_play") is True):
                         continue
 
-                    # Enforce volume/liquidity floor
                     vol = float(m.get("volume", 0) or 0)
                     liq = float(m.get("liquidity", 0) or 0)
                     if max(vol, liq) < min_volume:
@@ -83,10 +98,8 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
     try:
         for page in range(pages_to_fetch):
             offset = page * 100
-            # Order by volume24hr natively sorts highest liquidity to the top
             url = f"{POLYMARKET_BASE_URL}/events?closed=false&active=true&limit=100&offset={offset}&order=volume24hr&ascending=false"
             
-            # Map tag_id instead of string slug
             if tag_id is not None:
                 url += f"&tag_id={tag_id}"
 
@@ -96,7 +109,6 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
                 if not events: break
                 
                 for ev in events:
-                    # Native event-level live filter
                     if ignore_live and (ev.get("live") is True or ev.get("isLive") is True):
                         continue
                         
@@ -106,11 +118,9 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=1, ignore_live=True, mi
                         if m_id in seen_ids: continue
                         seen_ids.add(m_id)
                         
-                        # Native market-level live filter
                         if ignore_live and (m.get("live") is True or m.get("isLive") is True):
                             continue
 
-                        # Enforce volume/liquidity floor
                         vol = float(m.get("volume", 0) or 0)
                         liq = float(m.get("liquidity", 0) or 0)
                         if max(vol, liq) < min_volume:
@@ -142,9 +152,17 @@ def main():
     st.set_page_config(page_title="Arbitrage Scanner", layout="wide")
     st.title("📈 Prediction Market Arbitrage Scanner")
     
+    # Check Exchange Status Right Away
+    exchange_active, trading_active = check_kalshi_status()
+    if not exchange_active:
+        st.error("🚨 **Kalshi Exchange Status: OFFLINE.** The core exchange is down (likely maintenance). New trades will not execute.")
+    elif not trading_active:
+        st.warning("⚠️ **Kalshi Exchange Status: TRADING PAUSED.** The exchange is online, but trading is currently halted. Outside trading hours or emergency pause.")
+    else:
+        st.success("🟢 **Kalshi Exchange Status: ACTIVE & TRADING ENABLED.**")
+
     st.sidebar.subheader("🎯 Market Configuration")
 
-    # Independent mappings for Kalshi slugs and Polymarket tag IDs
     category_maps = {
         "All Markets": {"kalshi": "all", "poly_tag": None},
         "🎾 Tennis": {"kalshi": "tennis", "poly_tag": 864},
@@ -161,7 +179,6 @@ def main():
     arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
     ignore_live = st.sidebar.checkbox("Ignore Live/In-Play Games", value=True)
 
-    # New Volume/Liquidity Filter
     min_volume = st.sidebar.number_input(
         "Min Volume / Liquidity ($)", 
         min_value=0.0, 
@@ -174,13 +191,15 @@ def main():
     kalshi_pages = st.sidebar.number_input("Kalshi Pagination Depth", 1, 10, 2)
     poly_pages = st.sidebar.number_input("Polymarket Pagination Depth", 1, 10, 2)
 
-    if st.sidebar.button("Run Scanner"):
+    # Disable scan button if exchange is down
+    btn_disabled = not exchange_active or not trading_active
+    
+    if st.sidebar.button("Run Scanner", disabled=btn_disabled):
         st.session_state['run_scan'] = True
 
     if st.session_state.get('run_scan', False):
         with st.spinner(f"🔄 Fetching and scanning [{selected_cat_label}] markets. Please wait..."):
             
-            # Pass min_volume and specific platform categories
             raw_kalshi_list, k_status = fetch_kalshi_markets(
                 pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_volume=min_volume
             )
@@ -188,7 +207,6 @@ def main():
                 tag_id=poly_tag, pages_to_fetch=poly_pages, ignore_live=ignore_live, min_volume=min_volume
             )
 
-            # Filter Kalshi strictly using its designated slug
             kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, kalshi_cat)]
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
 
@@ -201,15 +219,10 @@ def main():
                     sim_score = similarity(k["title"], p["title"])
                     if sim_score >= match_strictness:
                         
-                        # Scenario 1: Buy Yes on Kalshi, No on Polymarket
                         cost_1 = k["yes_price"] + p["no_price"]
-                        
-                        # Scenario 2: Buy No on Kalshi, Yes on Polymarket
                         cost_2 = k["no_price"] + p["yes_price"]
-                        
                         best_cost = min(cost_1, cost_2)
                         
-                        # Apply arb filter if enabled
                         if arb_only and best_cost >= 1.0:
                             continue
                             
