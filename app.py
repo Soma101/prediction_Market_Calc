@@ -170,17 +170,25 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=5):
 STOP_WORDS = {
     "will", "happen", "the", "and", "for", "that", "this", "with", "from",
     "have", "more", "than", "before", "after", "2024", "2025", "2026", "2027",
-    "does", "what", "when", "where", "who", "which", "yes", "no", "market"
+    "does", "what", "when", "where", "who", "which", "yes", "no", "market",
+    # Sports & prop betting noise terms
+    "passing", "completions", "yards", "touchdowns", "tds", "points", "rebounds",
+    "assists", "interceptions", "rushing", "receiving", "over", "under", "total",
+    "ou", "least", "first", "second", "quarter", "half", "game", "season"
 }
 
 def clean_text_for_match(text):
-    text = re.sub(r'[^a-z0-9 ]', '', text.lower()).strip()
-    return text.replace("will ", "").replace(" happen", "")
+    text = re.sub(r'[^a-z0-9\s\.]', ' ', text.lower()).strip()
+    return re.sub(r'\s+', ' ', text)
+
+def extract_numbers(text):
+    """Extract numeric lines/targets to avoid matching different target numbers."""
+    return set(re.findall(r'\b\d+(?:\.\d+)?\b', text))
 
 def tokenize_title(text):
     clean = clean_text_for_match(text)
     words = clean.split()
-    return set(w for w in words if len(w) >= 3 and w not in STOP_WORDS)
+    return set(w for w in words if len(w) >= 2 and w not in STOP_WORDS)
 
 def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
     if not kalshi_markets or not poly_markets: return []
@@ -188,6 +196,8 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
     poly_index = defaultdict(list)
     for p in poly_markets:
         p_tokens = tokenize_title(p['title'])
+        p['tokens'] = p_tokens
+        p['numbers'] = extract_numbers(p['title'])
         for token in p_tokens:
             poly_index[token].append(p)
 
@@ -197,6 +207,8 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
     for k in kalshi_markets:
         k_tokens = tokenize_title(k['title'])
         if not k_tokens: continue
+
+        k_numbers = extract_numbers(k['title'])
 
         candidate_counts = defaultdict(int)
         candidate_objs = {}
@@ -209,22 +221,37 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
 
         if not candidate_counts: continue
 
-        min_matches = 2 if len(k_tokens) >= 2 else 1
-        relevant_candidates = [
-            candidate_objs[pid] for pid, count in candidate_counts.items()
-            if count >= min_matches
-        ]
-
         k_clean = clean_text_for_match(k['title'])
         best_match = None
         best_score = 0.0
 
-        for p in relevant_candidates:
-            p_clean = clean_text_for_match(p['title'])
-            score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
+        for pid, count in candidate_counts.items():
+            p = candidate_objs[pid]
+            p_tokens = p['tokens']
+            p_numbers = p['numbers']
 
-            if score > best_score and score >= min_similarity:
-                best_score = score
+            # Rule 1: If both titles have numbers (target lines) and none overlap, skip
+            if k_numbers and p_numbers and not (k_numbers & p_numbers):
+                continue
+
+            # Rule 2: Token overlap check (Jaccard similarity on core entities/names)
+            intersection = len(k_tokens & p_tokens)
+            union = len(k_tokens | p_tokens)
+            jaccard_score = intersection / union if union > 0 else 0.0
+
+            # Discard if core entities (player names, teams) do not overlap
+            if jaccard_score < 0.35 or intersection < 1:
+                continue
+
+            # Rule 3: Sequence matcher on cleaned strings
+            p_clean = clean_text_for_match(p['title'])
+            seq_score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
+
+            # Weighted combination of Token match and Sequence match
+            combined_score = (jaccard_score * 0.65) + (seq_score * 0.35)
+
+            if combined_score > best_score and seq_score >= min_similarity:
+                best_score = combined_score
                 best_match = p
 
         if best_match:
@@ -300,7 +327,7 @@ category_slug = category_map[selected_cat_label]
 
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
 
-match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=85, step=1) / 100.0
+match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=75, step=1) / 100.0
 
 kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
 poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=10, value=5)
@@ -320,7 +347,6 @@ no_source = "Manual Entry"
 
 if mode == "📡 Live Scanner (Auto-Match)":
     
-    # --- DEFER API FETCHING UNTIL BUTTON CLICK ---
     if st.button("🚀 Run Arbitrage Scan", type="primary", use_container_width=True):
         st.session_state['run_scan'] = True
 
