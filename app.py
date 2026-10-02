@@ -89,7 +89,8 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
     page = 0
     try:
         for page in range(pages_to_fetch):
-            url = f"{KALSHI_PROXY_URL}?limit=1000&status=active&mve_filter=exclude"
+            # Ensure status=open is used here
+            url = f"{KALSHI_PROXY_URL}?limit=1000&status=open&mve_filter=exclude"
             if cursor: url += f"&cursor={cursor}"
                 
             resp = requests.get(url, timeout=10)
@@ -101,11 +102,10 @@ def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
                     event_ticker = str(m.get("event_ticker", "")).lower()
                     
-                    # Strict Live Game Filter for Kalshi
+                    # Corrected Live Game Filter for Kalshi
                     if ignore_live:
+                        # Rely strictly on Kalshi's actual in_play boolean and naming conventions
                         if m.get("in_play") is True or m.get("is_in_play") is True:
-                            continue
-                        if m.get("status") == "active" and m.get("can_close_early") is True:
                             continue
                         title_lower = title.lower()
                         if any(kw in title_lower for kw in ["(live)", "[live]", " live ", "in-play", "in play", " live:"]):
