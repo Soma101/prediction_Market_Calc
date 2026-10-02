@@ -31,8 +31,8 @@ HEADERS = {
 # Status & Price Parsing Logic
 # ------------------------------------------------------------------
 @st.cache_data(ttl=60)
-def check__status():
-    """Ping  status endpoint through worker proxy."""
+def check_kalshi_status():
+    """Ping Kalshi status endpoint through worker proxy."""
     try:
         resp = requests.get(KALSHI_STATUS_URL, timeout=5)
         if resp.status_code == 200:
@@ -58,13 +58,10 @@ def parse_kalshi_market_prices(m):
     yes_ask = to_float(m.get("yes_ask_dollars") or m.get("yes_ask"))
     no_ask  = to_float(m.get("no_ask_dollars") or m.get("no_ask"))
     last_p  = to_float(m.get("last_price_dollars") or m.get("last_price"))
-    yes_bid = to_float(m.get("yes_bid_dollars") or m.get("yes_bid"))
 
-    # Try live ask prices first
     p_yes = yes_ask if 0.01 <= yes_ask <= 0.99 else 0.0
     p_no  = no_ask  if 0.01 <= no_ask <= 0.99  else 0.0
 
-    # Fallback to last price or bid complement if orderbook ask is missing
     if p_yes == 0.0 and 0.01 <= last_p <= 0.99:
         p_yes = last_p
     if p_no == 0.0 and p_yes > 0.0:
@@ -77,10 +74,10 @@ def parse_kalshi_market_prices(m):
     return 0.0, 0.0
 
 # ------------------------------------------------------------------
-# Live API Fetchers (Native Category Integration)
+# Live API Fetchers
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_liquidity=0.0):
+def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min_liquidity=0.0):
     parsed = []
     cursor = ""
     
@@ -92,7 +89,6 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
     try:
         for page in range(pages_to_fetch):
-            # Kalshi V2 API no longer accepts category filters in the URL.
             url = f"{KALSHI_MARKETS_URL}?limit=1000&status=open"
             if cursor: 
                 url += f"&cursor={cursor}"
@@ -117,15 +113,10 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
 
-                    # SMART LIQUIDITY CASCADE FOR KALSHI V2:
-                    # V2 API uses _fp (fixed point string) suffixes for volume and open interest.
-                    # Since these represent $1.00 payout contracts, their number equals their max dollar value.
                     try:
                         vol_24h = float(m.get("volume_24h_fp", 0))
                         vol_total = float(m.get("volume_fp", 0))
                         open_int = float(m.get("open_interest_fp", 0))
-                        
-                        # Use whichever is highest to prove the market is active and liquid
                         usd_liquidity = max(vol_24h, vol_total, open_int)
                     except (ValueError, TypeError):
                         usd_liquidity = 0.0
@@ -148,12 +139,12 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=5, ignore_live=True, min_
                 if not cursor: break
             else: break
                 
-        return parsed, f"✅ Kalshi: {len(parsed)} liquid markets loaded (Fetched globally due to API V2 changes)"
+        return parsed, f"✅ Kalshi: {len(parsed)} liquid markets loaded"
     except Exception as e:
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
 @st.cache_data(ttl=120)
-def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, min_liquidity=0.0):
+def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, min_liquidity=0.0):
     parsed = []
     seen_ids = set()
     
@@ -204,7 +195,6 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=5, ignore_live=True, mi
                             if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
                                 continue
 
-                        # STRICT Liquidity Check (Polymarket measures liquidity natively in dollars)
                         usd_liquidity = float(m.get("liquidity") or 0)
                         
                         if min_liquidity > 0 and usd_liquidity < min_liquidity:
@@ -407,7 +397,6 @@ def calculate_arbitrage_metrics(odds_yes, odds_no, budget, fee_pct):
 st.title("⚖ Prediction Market Arbitrage Scanner")
 st.caption("Auto-matches cross-platform markets to guarantee mathematically optimal spread setups.")
 
-# Check Exchange Status
 exchange_active, trading_active = check_kalshi_status()
 if not exchange_active:
     st.error("🚨 **Kalshi Exchange Status: OFFLINE.** Core exchange maintenance in progress.")
@@ -420,32 +409,10 @@ st.sidebar.header("⚙ Controls")
 mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️ Manual Custom Odds"])
 
 st.sidebar.subheader("🎯 Native Market Categories")
-st.sidebar.caption("API-level filtering drastically reduces loading times.")
 
-# Unified vs Split Native Category Engine
-category_mode = st.sidebar.radio("Category Routing", ["Auto-Mapped (Both Platforms)", "Split Custom (Independent)"])
-
-if category_mode == "Auto-Mapped (Both Platforms)":
-    category_maps = {
-        "All Markets": {"kalshi": None, "poly_tag": None},
-        "🎾 Tennis": {"kalshi": "sports", "poly_tag": 864}, 
-        "⚽ Sports (General)": {"kalshi": "sports", "poly_tag": 100639},
-        "🏛️ Politics": {"kalshi": "politics", "poly_tag": 2},
-        "📈 Crypto & Finance": {"kalshi": "crypto", "poly_tag": 21},
-        "🍿 Pop Culture": {"kalshi": "culture", "poly_tag": 596}
-    }
-    selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_maps.keys()))
-    kalshi_cat = category_maps[selected_cat_label]["kalshi"]
-    poly_tag = category_maps[selected_cat_label]["poly_tag"]
-else:
-    kalshi_native_cats = {"All": None, "Politics": "politics", "Crypto": "crypto", "Economics": "economics", "Sports": "sports", "Culture": "culture", "Science": "science"}
-    poly_native_tags = {"All": None, "Politics": 2, "Crypto": 21, "Sports": 100639, "Tennis": 864, "Pop Culture": 596, "Science": 133}
-    
-    k_label = st.sidebar.selectbox("Kalshi API Category", list(kalshi_native_cats.keys()))
-    p_label = st.sidebar.selectbox("Polymarket API Tag", list(poly_native_tags.keys()))
-    
-    kalshi_cat = kalshi_native_cats[k_label]
-    poly_tag = poly_native_tags[p_label]
+poly_native_tags = {"All": None, "Politics": 2, "Crypto": 21, "Sports": 100639, "Tennis": 864, "Pop Culture": 596, "Science": 133}
+p_label = st.sidebar.selectbox("Polymarket API Tag", list(poly_native_tags.keys()))
+poly_tag = poly_native_tags[p_label]
 
 st.sidebar.divider()
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
@@ -477,10 +444,9 @@ if mode == "📡 Live Scanner (Auto-Match)":
         st.session_state['run_scan'] = True
 
     if st.session_state.get('run_scan', False):
-        with st.spinner(f"🔄 Fetching markets directly from API categories..."):
+        with st.spinner(f"🔄 Fetching markets directly from APIs..."):
             
-            # Categories are now passed directly to the fetchers to eliminate downloading unrelated bulk data
-            kalshi_list, k_status = fetch_kalshi_markets(category=kalshi_cat, pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_liquidity=min_liquidity)
+            kalshi_list, k_status = fetch_kalshi_markets(category=None, pages_to_fetch=kalshi_pages, ignore_live=ignore_live, min_liquidity=min_liquidity)
             poly_list, p_status = fetch_polymarket_markets(tag_id=poly_tag, pages_to_fetch=poly_pages, ignore_live=ignore_live, min_liquidity=min_liquidity)
 
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
