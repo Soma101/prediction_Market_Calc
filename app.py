@@ -31,8 +31,8 @@ HEADERS = {
 # Status & Price Parsing Logic
 # ------------------------------------------------------------------
 @st.cache_data(ttl=60)
-def check_kalshi_status():
-    """Ping Kalshi status endpoint through worker proxy."""
+def check__status():
+    """Ping  status endpoint through worker proxy."""
     try:
         resp = requests.get(KALSHI_STATUS_URL, timeout=5)
         if resp.status_code == 200:
@@ -454,8 +454,8 @@ ignore_live = st.sidebar.checkbox("Ignore Live/In-Play Games", value=True)
 min_liquidity = st.sidebar.number_input("Min Available Liquidity (USD $)", min_value=0.0, value=100.0, step=100.0)
 match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=75, step=1) / 100.0
 
-kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=5, value=2)
-poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=10, value=5)
+kalshi_pages = st.sidebar.slider("Kalshi Fetch Depth (Pages x 1,000)", min_value=1, max_value=20, value=10)
+poly_pages = st.sidebar.slider("Polymarket Fetch Depth (Pages x 100)", min_value=1, max_value=50, value=15)
 
 budget = st.sidebar.number_input("Total Investment ($)", min_value=1.0, value=100.0, step=10.0)
 fee_pct = st.sidebar.number_input("Platform Fee on Profit (%)", min_value=0.0, max_value=20.0, value=0.0, step=0.5)
