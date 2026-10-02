@@ -3,7 +3,7 @@ import requests
 import json
 import difflib
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import defaultdict
 import pandas as pd
 
@@ -74,18 +74,12 @@ def parse_kalshi_market_prices(m):
     return 0.0, 0.0
 
 # ------------------------------------------------------------------
-# Live API Fetchers
+# Live API Fetchers (Native Filters & Timestamp Checks)
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
 def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min_liquidity=0.0):
     parsed = []
     cursor = ""
-    
-    live_keywords = [
-        "(live)", "[live]", " live ", "in-play", "in play", " live:", 
-        "1st half", "2nd half", "first half", "second half", "halftime",
-        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter"
-    ]
 
     try:
         for page in range(pages_to_fetch):
@@ -100,15 +94,10 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min
 
                 for m in data:
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
-                    event_ticker = str(m.get("event_ticker", "")).lower()
 
                     if ignore_live:
+                        # Strictly relies on native API boolean check for live games
                         if m.get("in_play") is True or m.get("is_in_play") is True:
-                            continue
-                        title_lower = title.lower()
-                        if any(kw in title_lower for kw in live_keywords):
-                            continue
-                        if any(kw in event_ticker for kw in ["-live", "live-", "inplay", "q1", "q2", "q3", "q4", "h1", "h2"]):
                             continue
 
                     p_yes, p_no = parse_kalshi_market_prices(m)
@@ -124,14 +113,21 @@ def fetch_kalshi_markets(category=None, pages_to_fetch=10, ignore_live=True, min
                     if min_liquidity > 0 and usd_liquidity < min_liquidity:
                         continue
 
+                    yes_name = m.get("yes_sub_title", "Yes")
+                    no_name = m.get("no_sub_title", "No")
+
                     if p_yes > 0 and p_no > 0:
                         parsed.append({
                             "id": m.get("ticker", "N/A"),
                             "title": title,
                             "category": m.get("category", "General"),
                             "ticker": m.get("ticker", ""),
-                            "yes_odds": 1.0 / p_yes,  # Full precision
-                            "no_odds": 1.0 / p_no,    # Full precision
+                            "p_yes": p_yes,
+                            "p_no": p_no,
+                            "yes_odds": 1.0 / p_yes,
+                            "no_odds": 1.0 / p_no,
+                            "yes_name": yes_name,
+                            "no_name": no_name,
                             "usd_liquidity": usd_liquidity,
                             "source": "Kalshi"
                         })
@@ -148,11 +144,8 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
     parsed = []
     seen_ids = set()
     
-    live_keywords = [
-        "(live)", "[live]", " live ", "in-play", "live prop", 
-        "1st half", "2nd half", "first half", "second half", "halftime",
-        "1st quarter", "2nd quarter", "3rd quarter", "4th quarter"
-    ]
+    # ISO 8601 current timestamp for start_date_min query parameter
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     try:
         for page in range(pages_to_fetch):
@@ -161,6 +154,10 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
             if tag_id is not None:
                 url += f"&tag_id={tag_id}"
 
+            if ignore_live:
+                # Direct API filter asking Polymarket for future-starting events only
+                url += f"&start_date_min={now_iso}"
+
             resp = requests.get(url, headers=HEADERS, timeout=10)
             if resp.status_code == 200:
                 events = resp.json()
@@ -168,14 +165,9 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                 
                 for ev in events:
                     event_title = ev.get("title", "")
-                    event_slug = str(ev.get("slug", "")).lower()
 
                     if ignore_live:
                         if ev.get("live") is True or ev.get("isLive") is True:
-                            continue
-                        if any(kw in event_title.lower() for kw in live_keywords):
-                            continue
-                        if any(kw in event_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-", "-liveprop"]):
                             continue
 
                     markets = ev.get("markets", [])
@@ -185,14 +177,9 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                         seen_ids.add(m_id)
                         
                         question = m.get("question", "")
-                        market_slug = str(m.get("slug", "")).lower()
 
                         if ignore_live:
                             if m.get("live") is True or m.get("isLive") is True:
-                                continue
-                            if any(kw in question.lower() for kw in live_keywords):
-                                continue
-                            if any(kw in market_slug for kw in ["-live-", "live-", "-live", "-q1-", "-q2-", "-q3-", "-q4-", "-h1-", "-h2-"]):
                                 continue
 
                         usd_liquidity = float(m.get("liquidity") or 0)
@@ -201,17 +188,28 @@ def fetch_polymarket_markets(tag_id=None, pages_to_fetch=15, ignore_live=True, m
                             continue
 
                         raw_prices = m.get("outcomePrices")
+                        raw_outcomes = m.get("outcomes")
+                        
                         if raw_prices:
                             try:
                                 prices = json.loads(raw_prices) if isinstance(raw_prices, str) else raw_prices
+                                outcomes_list = json.loads(raw_outcomes) if isinstance(raw_outcomes, str) else raw_outcomes
+                                
+                                if not outcomes_list or len(outcomes_list) < 2:
+                                    outcomes_list = ["Option A", "Option B"]
+                                    
                                 if len(prices) >= 2:
                                     p_yes, p_no = float(prices[0]), float(prices[1])
                                     if p_yes > 0 and p_no > 0:
                                         parsed.append({
                                             "id": m_id,
                                             "title": question or event_title or "Unknown",
-                                            "yes_odds": 1.0 / p_yes,  # Full precision
-                                            "no_odds": 1.0 / p_no,    # Full precision
+                                            "p_yes": p_yes,
+                                            "p_no": p_no,
+                                            "yes_odds": 1.0 / p_yes,
+                                            "no_odds": 1.0 / p_no,
+                                            "yes_name": str(outcomes_list[0]),
+                                            "no_name": str(outcomes_list[1]),
                                             "usd_liquidity": usd_liquidity,
                                             "source": "Polymarket"
                                         })
@@ -348,26 +346,32 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             
             seen_pair_keys.add(pair_key)
             matched_poly_ids.add(best_match['id'])
-            # Exact implied sum directly from contract prices
-            implied_sum_A = k['p_yes'] + best_match['p_no']
-            implied_sum_B = best_match['p_yes'] + k['p_no']
+
+            # Direct probabilities access with odds fallback to prevent KeyError
+            k_p_yes = k.get('p_yes', 1.0 / k['yes_odds'])
+            k_p_no  = k.get('p_no', 1.0 / k['no_odds'])
+            p_p_yes = best_match.get('p_yes', 1.0 / best_match['yes_odds'])
+            p_p_no  = best_match.get('p_no', 1.0 / best_match['no_odds'])
+
+            implied_sum_A = k_p_yes + p_p_no
+            implied_sum_B = p_p_yes + k_p_no
 
             if implied_sum_A < implied_sum_B:
                 best_pairs.append({
                     "implied_sum": implied_sum_A,
-                    "best_odds_yes": k['yes_odds'],
-                    "best_odds_no": best_match['no_odds'],
-                    "yes_source": f"Kalshi: {k['title']}",
-                    "no_source": f"Polymarket: {best_match['title']}",
+                    "best_odds_yes": round(1.0 / k_p_yes, 2),
+                    "best_odds_no": round(1.0 / p_p_no, 2),
+                    "yes_source": f"Kalshi: {k['title']} ➡️ [{k.get('yes_name', 'Yes')}]",
+                    "no_source": f"Polymarket: {best_match['title']} ➡️ [{best_match.get('no_name', 'No')}]",
                     "similarity": best_score
                 })
             else:
                 best_pairs.append({
                     "implied_sum": implied_sum_B,
-                    "best_odds_yes": best_match['yes_odds'],
-                    "best_odds_no": k['no_odds'],
-                    "yes_source": f"Polymarket: {best_match['title']}",
-                    "no_source": f"Kalshi: {k['title']}",
+                    "best_odds_yes": round(1.0 / p_p_yes, 2),
+                    "best_odds_no": round(1.0 / k_p_no, 2),
+                    "yes_source": f"Polymarket: {best_match['title']} ➡️ [{best_match.get('yes_name', 'Yes')}]",
+                    "no_source": f"Kalshi: {k['title']} ➡️ [{k.get('no_name', 'No')}]",
                     "similarity": best_score
                 })
 
