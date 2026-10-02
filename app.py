@@ -83,7 +83,7 @@ def matches_kalshi_category(market, cat_slug):
 # Live API Fetchers
 # ------------------------------------------------------------------
 @st.cache_data(ttl=120)
-def fetch_kalshi_markets(pages_to_fetch=1):
+def fetch_kalshi_markets(pages_to_fetch=1, ignore_live=True):
     parsed = []
     cursor = ""
     page = 0
@@ -99,6 +99,15 @@ def fetch_kalshi_markets(pages_to_fetch=1):
 
                 for m in data:
                     title = m.get("title") or m.get("subtitle") or m.get("ticker") or "Unknown"
+                    
+                    # Live game filter
+                    if ignore_live:
+                        if m.get("in_play") is True:
+                            continue
+                        title_lower = title.lower()
+                        if "(live)" in title_lower or "[live]" in title_lower or " live " in title_lower:
+                            continue
+
                     p_yes, p_no = parse_kalshi_market_prices(m)
 
                     if p_yes > 0 and p_no > 0:
@@ -120,7 +129,7 @@ def fetch_kalshi_markets(pages_to_fetch=1):
         return [], f"❌ Connection error to Kalshi Worker: {e}"
 
 @st.cache_data(ttl=120)
-def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1):
+def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1, ignore_live=True):
     parsed = []
     seen_ids = set()
     try:
@@ -136,12 +145,27 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1):
                 if not events: break
                 
                 for ev in events:
-                    markets = ev.get("markets", [])
                     event_title = ev.get("title", "")
+                    
+                    # Live game filter on event level
+                    if ignore_live:
+                        ev_title_lower = event_title.lower()
+                        if "(live)" in ev_title_lower or "[live]" in ev_title_lower:
+                            continue
+
+                    markets = ev.get("markets", [])
                     for m in markets:
                         m_id = str(m.get("id"))
                         if m_id in seen_ids: continue
                         seen_ids.add(m_id)
+                        
+                        question = m.get("question", "")
+
+                        # Live game filter on market level
+                        if ignore_live:
+                            q_lower = question.lower()
+                            if "(live)" in q_lower or "[live]" in q_lower:
+                                continue
 
                         raw_prices = m.get("outcomePrices")
                         if raw_prices:
@@ -152,7 +176,7 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1):
                                     if p_yes > 0 and p_no > 0:
                                         parsed.append({
                                             "id": m_id,
-                                            "title": m.get("question") or event_title or "Unknown",
+                                            "title": question or event_title or "Unknown",
                                             "yes_odds": round(1.0 / p_yes, 2),
                                             "no_odds": round(1.0 / p_no, 2),
                                             "source": "Polymarket"
@@ -390,6 +414,7 @@ selected_cat_label = st.sidebar.selectbox("Category Filter", list(category_map.k
 category_slug = category_map[selected_cat_label]
 
 arb_only = st.sidebar.checkbox("Only Show Guaranteed Arbitrage (S < 100%)", value=False)
+ignore_live = st.sidebar.checkbox("Ignore Live/In-Play Games", value=True)
 
 match_strictness = st.sidebar.slider("Match Strictness (Similarity %)", min_value=50, max_value=100, value=75, step=1) / 100.0
 
@@ -416,8 +441,8 @@ if mode == "📡 Live Scanner (Auto-Match)":
 
     if st.session_state.get('run_scan', False):
         with st.spinner(f"🔄 Fetching and scanning [{selected_cat_label}] markets. Please wait..."):
-            raw_kalshi_list, k_status = fetch_kalshi_markets(pages_to_fetch=kalshi_pages)
-            poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages)
+            raw_kalshi_list, k_status = fetch_kalshi_markets(pages_to_fetch=kalshi_pages, ignore_live=ignore_live)
+            poly_list, p_status = fetch_polymarket_markets(category_slug=category_slug, pages_to_fetch=poly_pages, ignore_live=ignore_live)
 
             kalshi_list = [m for m in raw_kalshi_list if matches_kalshi_category(m, category_slug)]
             st.caption(f"**Diagnostic Status:** {k_status} | {p_status}")
