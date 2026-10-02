@@ -165,103 +165,155 @@ def fetch_polymarket_markets(category_slug="all", pages_to_fetch=1):
         return [], f"❌ Polymarket API Error: {e}"
 
 # ------------------------------------------------------------------
-# Auto-Matching Arbitrage Engine
+# Auto-Matching Arbitrage Engine (STRICT SUBJECT & ENTITY MATCHING)
 # ------------------------------------------------------------------
 STOP_WORDS = {
     "will", "happen", "the", "and", "for", "that", "this", "with", "from",
-    "have", "more", "than", "before", "after", "2024", "2025", "2026", "2027",
-    "does", "what", "when", "where", "who", "which", "yes", "no", "market",
-    # Sports & prop betting noise terms
-    "passing", "completions", "yards", "touchdowns", "tds", "points", "rebounds",
-    "assists", "interceptions", "rushing", "receiving", "over", "under", "total",
-    "ou", "least", "first", "second", "quarter", "half", "game", "season"
+    "have", "more", "than", "before", "after", "does", "what", "when", 
+    "where", "who", "which", "yes", "no", "market", "a", "an", "is", "be", 
+    "to", "in", "on", "of", "by", "at", "or", "over", "under", "total", "ou",
+    # Generic sports & market structure boilerplate
+    "regular", "season", "game", "games", "per", "leader", "leaders", "most", 
+    "least", "first", "second", "quarter", "half", "nfl", "nba", "mlb", "nhl", 
+    "wta", "atp", "player", "team", "stats", "award", "winner", "champion"
 }
 
+CONFLICT_GROUPS = [
+    {"trump", "harris", "biden", "desantis", "haley", "newsom", "kennedy", "rfk", "walz", "vance"},
+    {"democrat", "republican", "gop", "dems", "democrats", "republicans"},
+    {"men", "women", "mens", "womens"}
+]
+
 def clean_text_for_match(text):
-    text = re.sub(r'[^a-z0-9\s\.]', ' ', text.lower()).strip()
+    # Standardize numbers with commas first (e.g. 1,000 -> 1000)
+    text = re.sub(r'(\d+),(\d+)', r'\1\2', text.lower())
+    text = re.sub(r'[^a-z0-9\s\.]', ' ', text).strip()
     return re.sub(r'\s+', ' ', text)
 
 def extract_numbers(text):
-    """Extract numeric lines/targets to avoid matching different target numbers."""
-    return set(re.findall(r'\b\d+(?:\.\d+)?\b', text))
+    """Extract numeric lines/targets while separating out season years."""
+    clean_text = re.sub(r'(\d+),(\d+)', r'\1\2', text)
+    all_nums = set(re.findall(r'\b\d+(?:\.\d+)?\b', clean_text))
+    
+    # Filter out common season/year markers
+    years = {n for n in all_nums if n in {"2024", "2025", "2026", "2027", "2028", "24", "25", "26", "27", "28"}}
+    lines = all_nums - years
+    return lines, years
 
 def tokenize_title(text):
+    """Extract key entity tokens only (ignoring dates, numbers, and boilerplate)."""
     clean = clean_text_for_match(text)
     words = clean.split()
-    return set(w for w in words if len(w) >= 2 and w not in STOP_WORDS)
+    return set(
+        w for w in words 
+        if len(w) >= 3 
+        and not w.isdigit() 
+        and w not in STOP_WORDS
+    )
 
-def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
+def has_entity_conflict(tokens_a, tokens_b):
+    """Prevents matching opposing candidates in the same market group."""
+    for group in CONFLICT_GROUPS:
+        a_matches = tokens_a & group
+        b_matches = tokens_b & group
+        if a_matches and b_matches and not (a_matches & b_matches):
+            return True
+    return False
+
+def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
     if not kalshi_markets or not poly_markets: return []
 
     poly_index = defaultdict(list)
     for p in poly_markets:
-        p_tokens = tokenize_title(p['title'])
-        p['tokens'] = p_tokens
-        p['numbers'] = extract_numbers(p['title'])
-        for token in p_tokens:
+        p_clean = clean_text_for_match(p['title'])
+        p['raw_tokens'] = set(p_clean.split())
+        p['tokens'] = tokenize_title(p['title'])
+        p['lines'], p['years'] = extract_numbers(p['title'])
+        
+        # Index ONLY by core subject tokens (ignoring numbers and generic words)
+        for token in p['tokens']:
             poly_index[token].append(p)
 
     best_pairs = []
     seen_pair_keys = set()
-    matched_poly_ids = set()  # Track already matched Polymarket IDs to reduce time complexity
+    matched_poly_ids = set()
 
     for k in kalshi_markets:
+        k_clean = clean_text_for_match(k['title'])
+        k_raw_tokens = set(k_clean.split())
         k_tokens = tokenize_title(k['title'])
+        
+        # If no unique subject tokens remain (e.g. title is purely generic text), skip
         if not k_tokens: continue
 
-        k_numbers = extract_numbers(k['title'])
+        k_lines, k_years = extract_numbers(k['title'])
 
         candidate_counts = defaultdict(int)
         candidate_objs = {}
 
+        # Look up candidates based on shared subject tokens ONLY
         for token in k_tokens:
-            for p in poly_index[token]:
+            for p in poly_index.get(token, []):
                 pid = p['id']
                 if pid in matched_poly_ids: 
-                    continue  # Short-circuit 1: skip already matched candidates
+                    continue
                 candidate_counts[pid] += 1
                 candidate_objs[pid] = p
 
         if not candidate_counts: continue
 
-        k_clean = clean_text_for_match(k['title'])
         best_match = None
         best_score = 0.0
 
         for pid, count in candidate_counts.items():
-            if pid in matched_poly_ids:
-                continue
-
+            if pid in matched_poly_ids: continue
+            
             p = candidate_objs[pid]
-            p_tokens = p['tokens']
-            p_numbers = p['numbers']
 
-            # Rule 1: If both titles have numbers (target lines) and none overlap, skip
-            if k_numbers and p_numbers and not (k_numbers & p_numbers):
+            # Rule 1: MUST share at least 1 core subject entity token (e.g. "darnell", "washington")
+            shared_entities = k_tokens & p['tokens']
+            if not shared_entities:
                 continue
 
-            # Rule 2: Token overlap check (Jaccard similarity on core entities/names)
-            intersection = len(k_tokens & p_tokens)
-            union = len(k_tokens | p_tokens)
+            # Rule 2: Line Check. If BOTH titles specify target numbers, at least one line must overlap,
+            # or equivalent line logic must hold (e.g. 0.5 vs 1).
+            if k_lines and p['lines']:
+                # Convert string lines to float sets for flexible matching
+                k_floats = {float(x) for x in k_lines}
+                p_floats = {float(x) for x in p['lines']}
+                
+                # Check for direct match or 0.5 rounding equivalents (e.g. 0.5 vs 1)
+                direct_match = bool(k_floats & p_floats)
+                half_point_match = any(abs(kf - pf) <= 0.5 for kf in k_floats for pf in p_floats)
+                
+                if not (direct_match or half_point_match):
+                    continue
+
+            # Rule 3: Strict Year/Season Check
+            if k_years and p['years'] and not (k_years & p['years']):
+                continue
+
+            # Rule 4: Entity Conflict Override
+            if has_entity_conflict(k_raw_tokens, p['raw_tokens']):
+                continue
+
+            # Rule 5: Token Similarity Ratio
+            intersection = len(k_tokens & p['tokens'])
+            union = len(k_tokens | p['tokens'])
             jaccard_score = intersection / union if union > 0 else 0.0
 
-            # Discard if core entities (player names, teams) do not overlap
-            if jaccard_score < 0.35 or intersection < 1:
-                continue
-
-            # Rule 3: Sequence matcher on cleaned strings
+            # Rule 6: String Sequence Matcher
             p_clean = clean_text_for_match(p['title'])
             seq_score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
+            
+            # Weighted combined score
+            combined_score = (jaccard_score * 0.60) + (seq_score * 0.40)
 
-            # Weighted combination of Token match and Sequence match
-            combined_score = (jaccard_score * 0.65) + (seq_score * 0.35)
-
-            if combined_score > best_score and seq_score >= min_similarity:
+            if combined_score > best_score and combined_score >= min_similarity:
                 best_score = combined_score
                 best_match = p
                 
-                # Short-circuit 2: Early exit on high confidence match to save difflib computations
-                if combined_score >= 0.90:
+                if combined_score >= 0.95:
                     break
 
         if best_match:
@@ -269,7 +321,7 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.62):
             if pair_key in seen_pair_keys: continue
             
             seen_pair_keys.add(pair_key)
-            matched_poly_ids.add(best_match['id'])  # Lock this market from future Kalshi checks
+            matched_poly_ids.add(best_match['id'])
 
             implied_sum_A = (1.0 / k['yes_odds']) + (1.0 / best_match['no_odds'])
             implied_sum_B = (1.0 / best_match['yes_odds']) + (1.0 / k['no_odds'])
