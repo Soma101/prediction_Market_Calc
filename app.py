@@ -270,8 +270,12 @@ def clean_text_for_match(text):
     return re.sub(r'\s+', ' ', text)
 
 def extract_threshold_numbers(text):
-    """Extracts explicit threshold digits (e.g., '4+' or '5+') from titles."""
+    """Extracts explicit threshold digits but handles ordinal suffixes (1st, 2nd, 15th)."""
+    # Remove commas in numbers (e.g., 10,000 -> 10000)
     clean_text = re.sub(r'(\d+),(\d+)', r'\1\2', text.lower())
+    # Strip ordinal suffixes so '15th' becomes '15'
+    clean_text = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', clean_text)
+    
     raw_nums = re.findall(r'\b\d+(?:\.\d+)?\b', clean_text)
     years = {"2024", "2025", "2026", "2027", "2028", "24", "25", "26", "27", "28"}
     
@@ -285,14 +289,15 @@ def extract_threshold_numbers(text):
     return thresholds
 
 def tokenize_title(text):
+    """Tokenizes while removing trailing 's' to bridge plural/singular mismatches."""
     clean = clean_text_for_match(text)
     words = clean.split()
-    return set(
-        w for w in words 
-        if len(w) >= 3 
-        and not w.isdigit() 
-        and w not in STOP_WORDS
-    )
+    tokens = set()
+    for w in words:
+        if len(w) >= 3 and not w.isdigit() and w not in STOP_WORDS:
+            # Basic stemming: strip trailing 's' for rate vs rates, democrat vs democrats
+            tokens.add(w[:-1] if w.endswith('s') else w)
+    return tokens
 
 def has_entity_conflict(tokens_a, tokens_b):
     for group in CONFLICT_GROUPS:
@@ -349,11 +354,10 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             shared_entities = k_tokens & p['tokens']
             if not shared_entities: continue
 
-            # Strict threshold matching rule:
-            # If threshold numbers exist on either market, BOTH must have them and they MUST match!
-            if k_lines or p['lines']:
-                if not k_lines or not p['lines']:
-                    continue
+            # --- THE FIXED NUMBER GUARD ---
+            # Only fail if BOTH have numbers, AND they share NO common numbers.
+            # Protects against line mismatch (4.5 vs 5.5) without penalizing NLP title overlaps.
+            if k_lines and p['lines']:
                 if not (k_lines & p['lines']):
                     continue
 
@@ -366,7 +370,8 @@ def find_best_arbitrage(kalshi_markets, poly_markets, min_similarity=0.65):
             p_clean = clean_text_for_match(p['title'])
             seq_score = difflib.SequenceMatcher(None, k_clean, p_clean).ratio()
             
-            combined_score = (jaccard_score * 0.60) + (seq_score * 0.40)
+            # Adjusted ratio to equally weight string sequence and keyword matches
+            combined_score = (jaccard_score * 0.50) + (seq_score * 0.50)
 
             if combined_score > best_score and combined_score >= min_similarity:
                 best_score = combined_score
@@ -442,7 +447,7 @@ else:
     st.success("🟢 **Kalshi Exchange Status: ACTIVE & TRADING ENABLED.**")
 
 st.sidebar.header("⚙ Controls")
-mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️ Manual Custom Odds"])
+mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️️ Manual Custom Odds"])
 
 st.sidebar.subheader("🎯 Native Market Categories")
 
