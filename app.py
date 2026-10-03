@@ -447,7 +447,7 @@ else:
     st.success("🟢 **Kalshi Exchange Status: ACTIVE & TRADING ENABLED.**")
 
 st.sidebar.header("⚙ Controls")
-mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏️️ Manual Custom Odds"])
+mode = st.sidebar.radio("Data Mode", ["📡 Live Scanner (Auto-Match)", "✏ Manual Custom Odds"])
 
 st.sidebar.subheader("🎯 Native Market Categories")
 
